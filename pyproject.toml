@@ -1,0 +1,42 @@
+[project]
+name = "odoo-db"
+version = "0.0.0"
+description = "Odoo databases management CLI tool"
+authors = [{name = "duydoanh", email = "moncoeur2k1@gmail.com"}]
+requires-python = ">=3.10"
+readme = "README.md"
+license = "AGPL-3.0"
+license-files = ["LICENSE"]
+
+dependencies = [
+    "typer>=0.20",
+    "psycopg[binary]>=3.1",
+]
+
+[project.urls]
+Repository = "https://github.com/trobz/odoo-db"
+[project.scripts]
+odoo-db = "odoo_db.main:app"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=2.20.0",
+    "ty>=0.0.1a16",
+    "ruff>=0.11.5",
+    "pytest>=7.2.0",
+    "python-semantic-release>=10.5.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+
+[build-system]
+requires = ["uv_build>=0.7.19,<0.8.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "odoo_db"
+module-root = ""
+
+
