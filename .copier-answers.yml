@@ -4,10 +4,11 @@ _src_path: https://github.com/trobz/trobz-python-template.git
 author_email: moncoeur2k1@gmail.com
 author_username: duydoanh
 enable_docs_site: false
-enable_github_action: false
+enable_github_action: true
 package_name: odoo_db
 project_description: Odoo databases management CLI tool
 project_name: odoo-db
 project_type: cli
+publish_to_pypi: false
 repository_name: odoo-db
 repository_namespace: trobz

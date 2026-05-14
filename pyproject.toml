@@ -11,6 +11,7 @@ license-files = ["LICENSE"]
 dependencies = [
     "typer>=0.20",
     "psycopg[binary]>=3.1",
+    "rich>=13.0",
 ]
 
 [project.urls]
@@ -40,3 +41,36 @@ module-name = "odoo_db"
 module-root = ""
 
 
+[project.optional-dependencies]
+build = ["uv ~= 0.7.12"]
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+build_command = """
+  python -m pip install -e '.[build]'
+  uv lock --upgrade-package odoo-db
+  git add uv.lock
+  uv build
+"""
+
+# Commit parser - this should be at the top level
+commit_parser = "conventional"
+
+# Allow 0.x.x versions (prevents jumping straight to 1.0.0)
+allow_zero_version = true
+
+# Don't do major version bumps when in 0.x.x
+major_on_zero = false
+
+# Tag format
+tag_format = "v{version}"
+
+[tool.semantic_release.changelog]
+exclude_commit_patterns = [
+    '''chore(?:\([^)]*?\))?: .+''',
+    '''ci(?:\([^)]*?\))?: .+''',
+    '''style(?:\([^)]*?\))?: .+''',
+    '''test(?:\([^)]*?\))?: .+''',
+    '''build\((?!deps\): .+)''',
+    '''initial commit.*''',
+]

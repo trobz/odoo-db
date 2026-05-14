@@ -218,3 +218,6 @@ __marimo__/
 
 # Plans (local planning files)
 plans/
+
+# Logs
+logs/*.log
