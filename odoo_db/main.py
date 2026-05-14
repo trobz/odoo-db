@@ -277,5 +277,81 @@ def locks(db_name: Annotated[str, typer.Argument(metavar="DB")]):
                     w.text(f"  [{pid}] {query}")
 
 
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+
+def _fmt_bytes(b: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if b < 1024:
+            return f"{b:.0f} {unit}"
+        b //= 1024
+    return f"{b:.0f} TB"
+
+
+@app.command()
+def stats(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    years: Annotated[int, typer.Option("--years", "-y", help="Number of years to show")] = 3,
+    top: Annotated[int, typer.Option("--top", "-n", help="Number of top tables to show")] = 20,
+):
+    """Show per-table record counts and sizes for a database."""
+    with _handle_errors(db_name):
+        data = db.get_stats(db_name, years=years, top=top)
+
+    year_cols = data["years"]
+    tables = data["tables"]
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(data)
+        elif w.fmt == "prometheus":
+            lines = [
+                "# HELP odoo_db_table_size_bytes Table total size in bytes",
+                "# TYPE odoo_db_table_size_bytes gauge",
+            ]
+            for t in tables:
+                lines.append(f'odoo_db_table_size_bytes{{db="{db_name}",table="{t["table"]}"}} {t["total_size_bytes"]}')
+            lines += [
+                "# HELP odoo_db_table_records Total record count per table",
+                "# TYPE odoo_db_table_records gauge",
+            ]
+            for t in tables:
+                lines.append(f'odoo_db_table_records{{db="{db_name}",table="{t["table"]}"}} {t["total_records"]}')
+            w.prometheus(lines)
+        else:
+            w.text(f"Total DB size: {data['db_size']}\n")
+            w.text("Columns:")
+            w.text("  size    = total table size (heap + indexes + toast)")
+            w.text("  indexes = sum of all index sizes")
+            w.text("  attach  = attachment file sizes linked to this model (dedup by checksum)")
+            w.text(f"  {'/'.join(str(y) for y in year_cols)} = records created that year")
+            w.text("")
+            headers = ["table", "model", "records", "size", "indexes", "attach"] + [str(y) for y in year_cols]
+            rows = [
+                [
+                    t["table"],
+                    t["model"],
+                    f"{t['total_records']:,}",
+                    _fmt_bytes(t["total_size_bytes"]),
+                    _fmt_bytes(t["index_size_bytes"]),
+                    _fmt_bytes(t["attachment_size_bytes"]),
+                    *[f"{t['year_counts'].get(y, 0):,}" for y in year_cols],
+                ]
+                for t in tables
+            ]
+            footer = [
+                f"TOP {len(tables)}",
+                "",
+                f"{sum(t['total_records'] for t in tables):,}",
+                _fmt_bytes(sum(t["total_size_bytes"] for t in tables)),
+                _fmt_bytes(sum(t["index_size_bytes"] for t in tables)),
+                _fmt_bytes(sum(t["attachment_size_bytes"] for t in tables)),
+                *[f"{sum(t['year_counts'].get(y, 0) for t in tables):,}" for y in year_cols],
+            ]
+            w.table(headers, rows, footer=footer)
+
+
 if __name__ == "__main__":
     app()

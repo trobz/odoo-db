@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import psycopg
+from psycopg import sql
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,118 @@ def get_users(dbname: str) -> list[dict]:
                 ORDER BY ru.login
             """)
         return [{"login": row[0], "name": row[1] or "", "state": row[2]} for row in cur.fetchall()]
+
+
+def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
+    with connect(dbname) as conn, conn.cursor() as cur:
+        # All Odoo tables (have create_date)
+        cur.execute("""
+            SELECT c.relname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_attribute a ON a.attrelid = c.oid
+            WHERE n.nspname = 'public' AND a.attname = 'create_date' AND c.relkind = 'r'
+            ORDER BY c.relname
+        """)
+        all_tables = [row[0] for row in cur.fetchall()]
+
+        # Map table -> model name
+        cur.execute("SELECT replace(model, '.', '_') AS tbl, model FROM ir_model")
+        table_to_model = {row[0]: row[1] for row in cur.fetchall()}
+
+        # Table sizes (top N by total size)
+        cur.execute(
+            """
+            SELECT relname,
+                pg_total_relation_size(relid) AS total_bytes,
+                pg_relation_size(relid) AS table_bytes
+            FROM pg_statio_user_tables
+            WHERE relname = ANY(%s)
+            ORDER BY total_bytes DESC
+            LIMIT %s
+        """,
+            (all_tables, top),
+        )
+        size_rows = cur.fetchall()
+        top_tables = [row[0] for row in size_rows]
+
+        # Year columns for the report
+        cur.execute("SELECT EXTRACT(year FROM NOW())::int")
+        current_year = cur.fetchone()[0]
+        year_cols = list(range(current_year - years + 1, current_year + 1))
+
+        # Records per year per table
+        table_year_counts: dict[str, dict[int, int]] = {}
+        for table in top_tables:
+            cur.execute(
+                sql.SQL("""
+                    SELECT EXTRACT(year FROM create_date)::int AS yr, count(*)
+                    FROM {}
+                    WHERE create_date >= NOW() - make_interval(years => %s)
+                    GROUP BY yr
+                """).format(sql.Identifier(table)),
+                (years,),
+            )
+            table_year_counts[table] = {row[0]: row[1] for row in cur.fetchall()}
+
+        # Total record count per table
+        total_counts: dict[str, int] = {}
+        for table in top_tables:
+            cur.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table)))
+            total_counts[table] = cur.fetchone()[0]
+
+        # Index sizes per table (sum all indexes per table)
+        cur.execute(
+            """
+            SELECT i.relname AS table_name, sum(pg_relation_size(i.indexrelid)) AS index_bytes
+            FROM pg_stat_all_indexes i
+            JOIN pg_class c ON i.relid = c.oid
+            WHERE i.schemaname NOT IN ('information_schema', 'pg_catalog', 'pg_toast', 'pg_logical')
+            AND i.relname = ANY(%s)
+            GROUP BY i.relname
+        """,
+            (top_tables,),
+        )
+        index_sizes = {row[0]: row[1] for row in cur.fetchall()}
+
+        # Attachment sizes per model (dedup by checksum)
+        cur.execute("""
+            WITH unique_attachments AS (
+                SELECT res_model, file_size,
+                    row_number() OVER (PARTITION BY checksum ORDER BY id) AS rowno
+                FROM ir_attachment
+            )
+            SELECT res_model, sum(file_size)
+            FROM unique_attachments
+            WHERE rowno = 1
+            GROUP BY res_model
+        """)
+        # keyed by model name (dotted), convert to table name for lookup
+        attachment_by_model = {row[0]: row[1] for row in cur.fetchall()}
+        attachment_sizes = {tbl: attachment_by_model.get(mdl, 0) for tbl, mdl in table_to_model.items()}
+
+        # Total DB size
+        cur.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
+        db_size = cur.fetchone()[0]
+
+        tables = []
+        for relname, total_bytes, table_bytes in size_rows:
+            tables.append({
+                "table": relname,
+                "model": table_to_model.get(relname, ""),
+                "total_records": total_counts.get(relname, 0),
+                "total_size_bytes": total_bytes,
+                "table_size_bytes": table_bytes,
+                "index_size_bytes": index_sizes.get(relname, 0),
+                "attachment_size_bytes": attachment_sizes.get(relname, 0),
+                "year_counts": {yr: table_year_counts.get(relname, {}).get(yr, 0) for yr in year_cols},
+            })
+
+        return {
+            "db_size": db_size,
+            "years": year_cols,
+            "tables": tables,
+        }
 
 
 def get_locks(dbname: str) -> dict:

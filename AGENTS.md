@@ -51,6 +51,7 @@ odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log
 | `jobs <db>` | Queue job counts by state (returns message if queue_job not installed) |
 | `users <db>` | Active users with connection status (via bus_presence if available) |
 | `locks <db>` | Active DB locks (blocked/blocking PIDs + queries) |
+| `stats <db>` | Per-table record counts and sizes by year; `--years N` (default 3), `--top N` (default 20) |
 
 **Key SQL for `list`:**
 ```sql
