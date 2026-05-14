@@ -353,5 +353,72 @@ def stats(
             w.table(headers, rows, footer=footer)
 
 
+# ---------------------------------------------------------------------------
+# not-odoo
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="not-odoo")
+def cmd_not_odoo(db_name: Annotated[str, typer.Argument(metavar="DB")]):
+    """Show non-Odoo database objects: custom views, triggers, and functions."""
+    with _handle_errors(db_name):
+        data = db.get_not_odoo(db_name)
+
+    views = data["views"]
+    triggers = data["triggers"]
+    functions = data["functions"]
+    procedures = data["procedures"]
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(data)
+        elif w.fmt == "prometheus":
+            lines = [
+                "# HELP odoo_db_custom_views Custom (non-Odoo) view count",
+                "# TYPE odoo_db_custom_views gauge",
+                f'odoo_db_custom_views{{db="{db_name}"}} {len(views)}',
+                "# HELP odoo_db_custom_triggers Custom trigger count",
+                "# TYPE odoo_db_custom_triggers gauge",
+                f'odoo_db_custom_triggers{{db="{db_name}"}} {len(triggers)}',
+                "# HELP odoo_db_custom_functions Custom (non-extension) function count",
+                "# TYPE odoo_db_custom_functions gauge",
+                f'odoo_db_custom_functions{{db="{db_name}"}} {len(functions)}',
+                "# HELP odoo_db_custom_procedures Custom stored procedure count",
+                "# TYPE odoo_db_custom_procedures gauge",
+                f'odoo_db_custom_procedures{{db="{db_name}"}} {len(procedures)}',
+            ]
+            w.prometheus(lines)
+        else:
+            w.text(f"=== Views not in ir_model ({len(views)}) ===")
+            if views:
+                w.table(["view"], [[v] for v in views])
+            else:
+                w.text("(none)")
+
+            w.text("")
+            w.text(f"=== Triggers ({len(triggers)}) ===")
+            if triggers:
+                w.table(
+                    ["table", "trigger", "timing", "events"],
+                    [[t["table"], t["name"], t["timing"], t["events"]] for t in triggers],
+                )
+            else:
+                w.text("(none)")
+
+            w.text("")
+            w.text(f"=== Functions ({len(functions)}) ===")
+            if functions:
+                w.table(["function"], [[f] for f in functions])
+            else:
+                w.text("(none)")
+
+            w.text("")
+            w.text(f"=== Stored Procedures ({len(procedures)}) ===")
+            if procedures:
+                w.table(["procedure"], [[p] for p in procedures])
+            else:
+                w.text("(none)")
+
+
 if __name__ == "__main__":
     app()

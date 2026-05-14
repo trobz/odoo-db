@@ -45,6 +45,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `users <db>` | List active users with connection status |
 | `locks <db>` | Show active PostgreSQL locks |
 | `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`) |
+| `not-odoo <db>` | Show non-Odoo database objects: custom views, triggers, and functions |
 
 ## Examples
 

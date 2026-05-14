@@ -52,6 +52,7 @@ odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log
 | `users <db>` | Active users with connection status (via bus_presence if available) |
 | `locks <db>` | Active DB locks (blocked/blocking PIDs + queries) |
 | `stats <db>` | Per-table record counts and sizes by year; `--years N` (default 3), `--top N` (default 20) |
+| `not-odoo <db>` | Show non-Odoo objects: custom views (not in ir_model), triggers, and custom functions |
 
 **Key SQL for `list`:**
 ```sql
