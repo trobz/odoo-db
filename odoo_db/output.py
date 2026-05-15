@@ -29,13 +29,19 @@ class Writer:
     def _write(self, text: str):
         print(text, file=self._f)
 
-    def table(self, headers: list[str], rows: list[list[str]], empty_msg: str = "(no results)"):
+    def table(
+        self,
+        headers: list[str],
+        rows: list[list[str]],
+        empty_msg: str = "(no results)",
+        footer: list[str] | None = None,
+    ):
         if not rows:
             self._write(empty_msg)
             return
-        t = Table(show_header=True, header_style="bold cyan", show_lines=True)
-        for h in headers:
-            t.add_column(h)
+        t = Table(show_header=True, header_style="bold cyan", show_lines=True, show_footer=footer is not None)
+        for i, h in enumerate(headers):
+            t.add_column(h, footer=("[bold]" + footer[i] + "[/bold]") if footer else "")
         for row in rows:
             t.add_row(*row)
         console = Console(file=self._f)

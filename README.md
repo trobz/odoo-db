@@ -44,6 +44,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `jobs <db>` | Queue job counts by state (requires `queue_job` module) |
 | `users <db>` | List active users with connection status |
 | `locks <db>` | Show active PostgreSQL locks |
+| `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`) |
 
 ## Examples
 
@@ -65,6 +66,12 @@ odoo-db modules my_db
 
 # Show queue jobs
 odoo-db jobs my_db
+
+# Per-table stats: record counts and sizes for last 3 years
+odoo-db stats my_db
+
+# Top 10 tables, last 5 years
+odoo-db stats my_db --top 10 --years 5
 
 # Debug mode with full logging
 odoo-db --log-level debug list
