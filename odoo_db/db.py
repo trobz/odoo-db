@@ -6,8 +6,12 @@ from dataclasses import dataclass
 
 import psycopg
 from psycopg import sql
+from rich.console import Console
+from rich.progress import track
 
 logger = logging.getLogger(__name__)
+
+_progress_console = Console(stderr=True)
 
 
 @contextmanager
@@ -173,19 +177,20 @@ def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
         cur.execute("SELECT replace(model, '.', '_') AS tbl, model FROM ir_model")
         table_to_model = {row[0]: row[1] for row in cur.fetchall()}
 
-        # Table sizes (top N by total size)
-        cur.execute(
-            """
+        # Table sizes (top N by total size; top=0 means no limit)
+        size_query = """
             SELECT relname,
                 pg_total_relation_size(relid) AS total_bytes,
                 pg_relation_size(relid) AS table_bytes
             FROM pg_statio_user_tables
             WHERE relname = ANY(%s)
             ORDER BY total_bytes DESC
-            LIMIT %s
-        """,
-            (all_tables, top),
-        )
+        """
+        size_params: list = [all_tables]
+        if top > 0:
+            size_query += " LIMIT %s"
+            size_params.append(top)
+        cur.execute(size_query, size_params)
         size_rows = cur.fetchall()
         top_tables = [row[0] for row in size_rows]
 
@@ -194,9 +199,15 @@ def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
         current_year = cur.fetchone()[0]
         year_cols = list(range(current_year - years + 1, current_year + 1))
 
-        # Records per year per table
+        # Per-table queries: year_counts + total count, with progress bar on stderr
         table_year_counts: dict[str, dict[int, int]] = {}
-        for table in top_tables:
+        total_counts: dict[str, int] = {}
+        for table in track(
+            top_tables,
+            description="Scanning tables",
+            console=_progress_console,
+            transient=True,
+        ):
             cur.execute(
                 sql.SQL("""
                     SELECT EXTRACT(year FROM create_date)::int AS yr, count(*)
@@ -207,10 +218,6 @@ def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
                 (years,),
             )
             table_year_counts[table] = {row[0]: row[1] for row in cur.fetchall()}
-
-        # Total record count per table
-        total_counts: dict[str, int] = {}
-        for table in top_tables:
             cur.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table)))
             total_counts[table] = cur.fetchone()[0]
 
@@ -226,7 +233,7 @@ def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
         """,
             (top_tables,),
         )
-        index_sizes = {row[0]: row[1] for row in cur.fetchall()}
+        index_sizes = {row[0]: int(row[1]) for row in cur.fetchall()}
 
         # Attachment sizes per model (dedup by checksum)
         cur.execute("""
@@ -241,7 +248,7 @@ def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
             GROUP BY res_model
         """)
         # keyed by model name (dotted), convert to table name for lookup
-        attachment_by_model = {row[0]: row[1] for row in cur.fetchall()}
+        attachment_by_model = {row[0]: int(row[1]) for row in cur.fetchall()}
         attachment_sizes = {tbl: attachment_by_model.get(mdl, 0) for tbl, mdl in table_to_model.items()}
 
         # Total DB size

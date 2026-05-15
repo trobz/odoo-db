@@ -18,3 +18,8 @@ def test_list_help():
 def test_modules_help():
     result = runner.invoke(app, ["modules", "--help"])
     assert result.exit_code == 0
+
+
+def test_prepare_audit_help():
+    result = runner.invoke(app, ["prepare-audit", "--help"])
+    assert result.exit_code == 0
