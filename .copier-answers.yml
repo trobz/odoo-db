@@ -9,6 +9,6 @@ package_name: odoo_db
 project_description: Odoo databases management CLI tool
 project_name: odoo-db
 project_type: cli
-publish_to_pypi: false
+publish_to_pypi: true
 repository_name: odoo-db
 repository_namespace: trobz
