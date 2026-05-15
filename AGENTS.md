@@ -2,6 +2,17 @@
 
 > Quick reference for AI coding agents.
 
+## Agent Discipline
+
+**After every change, always:**
+1. Update `README.md` and `AGENTS.md` to reflect changes (new flags, commands, behavior).
+2. Run `make check` (lint + format + type-check) before committing.
+3. Run pre-commit: `uv run pre-commit run -a` or via `make check`.
+
+Never skip these steps. They catch regressions and keep docs in sync.
+
+---
+
 ## Project
 
 `odoo-db` — CLI tool for Odoo database management. Connects to local PostgreSQL
@@ -15,16 +26,20 @@ Odoo locally.
 ## Entry Points
 
 - `odoo_db/main.py` — CLI entry point (`odoo-db` command)
+- `odoo_db/db.py` — all DB queries (psycopg3)
+- `odoo_db/output.py` — output formatting (text/json/prometheus)
 
 ## CLI Structure
 
 ```
-odoo-db [--output-file FILE] [--output-format FORMAT] COMMAND [ARGS]
+odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log-file FILE] COMMAND [ARGS]
 ```
 
 **Global flags:**
 - `--output-file` — default `-` (stdout)
 - `--output-format` — `text` (default), `json`, `prometheus`
+- `--log-level` — `DEBUG`, `INFO`, `WARNING` (default), `ERROR`
+- `--log-file` — default `logs/odoo-db.log` (auto-created, gitignored)
 
 **Commands:**
 
@@ -33,9 +48,9 @@ odoo-db [--output-file FILE] [--output-format FORMAT] COMMAND [ARGS]
 | `list` | All local Odoo DBs: name, version, neutralized status. `--verbose`: + module count, user count |
 | `modules <db>` | Installed modules with version |
 | `crons <db>` | Active scheduled actions |
-| `jobs <db>` | Queue jobs (pg_queue_job) |
-| `users <db>` | Users list |
-| `locks <db>` | Active DB locks |
+| `jobs <db>` | Queue job counts by state (returns message if queue_job not installed) |
+| `users <db>` | Active users with connection status (via bus_presence if available) |
+| `locks <db>` | Active DB locks (blocked/blocking PIDs + queries) |
 
 **Key SQL for `list`:**
 ```sql
@@ -56,6 +71,12 @@ Connect via psycopg3 (Unix socket, peer auth):
 psycopg.connect(dbname=db_name)  # no host/user needed for local socket
 ```
 
+## Logging
+
+- Console handler always active.
+- File handler writes to `--log-file` (default `logs/odoo-db.log`), parent dir auto-created.
+- `logs/*.log` is gitignored; `logs/.gitkeep` tracks the directory.
+
 ## Dev Commands
 
 Run `make help` for all commands. Key ones:
@@ -71,4 +92,5 @@ make test      # Run pytest
 - `Makefile` — Project commands
 - `pyproject.toml` — Dependencies and build config
 - `ruff.toml` — Linter/formatter rules
+- `logs/` — Log output directory (`.gitkeep` tracked, `*.log` gitignored)
 - `tests/` — Test suite (pytest)
