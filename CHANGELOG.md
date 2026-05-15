@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-05-15)
+
+### Features
+
+- Add prepare-audit command — bundle $db.json for /odoo-dev:audit-db
+  ([`1d744ad`](https://github.com/trobz/odoo-db/commit/1d744ad3be69cbf0d7539a89711e00b084a93fc3))
+
+- Progress bar for per-table stats queries
+  ([`159c482`](https://github.com/trobz/odoo-db/commit/159c482d0872c1f4acbf46729b0ad67465ae2551))
+
+
 ## v1.3.0 (2026-05-15)
 
 ### Documentation
