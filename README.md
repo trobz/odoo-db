@@ -45,6 +45,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `users <db>` | List active users with connection status |
 | `locks <db>` | Show active PostgreSQL locks |
 | `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`) |
+| `not-odoo <db>` | Show non-Odoo database objects: custom views, triggers, functions, and stored procedures |
 
 ## Examples
 
@@ -75,6 +76,12 @@ odoo-db stats my_db --top 10 --years 5
 
 # Debug mode with full logging
 odoo-db --log-level debug list
+
+# Show non-Odoo objects: custom views, triggers, functions, stored procedures
+odoo-db not-odoo my_db
+
+# Export not-odoo report as JSON
+odoo-db --output-format json not-odoo my_db
 ```
 
 ## Dev

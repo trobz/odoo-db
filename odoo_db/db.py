@@ -268,6 +268,56 @@ def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
         }
 
 
+def get_not_odoo(dbname: str) -> dict:
+    with connect(dbname) as conn, conn.cursor() as cur:
+        # Views not tracked in ir_model
+        cur.execute("""
+            SELECT viewname
+            FROM pg_views
+            WHERE schemaname = 'public'
+              AND viewname NOT IN (
+                SELECT replace(model, '.', '_') FROM ir_model
+              )
+            ORDER BY viewname
+        """)
+        views = [row[0] for row in cur.fetchall()]
+
+        # Triggers (Odoo never creates triggers; aggregate events per trigger+table)
+        cur.execute("""
+            SELECT trigger_name, event_object_table,
+                   string_agg(DISTINCT event_manipulation, '/' ORDER BY event_manipulation) AS events,
+                   action_timing
+            FROM information_schema.triggers
+            WHERE trigger_schema = 'public'
+            GROUP BY trigger_name, event_object_table, action_timing
+            ORDER BY event_object_table, trigger_name
+        """)
+        triggers = [{"name": row[0], "table": row[1], "events": row[2], "timing": row[3]} for row in cur.fetchall()]
+
+        # Custom functions and procedures (exclude extension-provided ones like crosstab, dblink)
+        cur.execute("""
+            SELECT DISTINCT p.proname, p.prokind
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            LEFT JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e'
+            LEFT JOIN pg_extension e ON e.oid = d.refobjid
+            WHERE n.nspname = 'public'
+              AND e.extname IS NULL
+              AND p.prokind IN ('f', 'p')
+            ORDER BY p.proname
+        """)
+        routines = cur.fetchall()
+        functions = [row[0] for row in routines if row[1] == "f"]
+        procedures = [row[0] for row in routines if row[1] == "p"]
+
+        return {
+            "views": views,
+            "triggers": triggers,
+            "functions": functions,
+            "procedures": procedures,
+        }
+
+
 def get_locks(dbname: str) -> dict:
     with connect(dbname) as conn, conn.cursor() as cur:
         cur.execute(
