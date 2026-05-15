@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -418,6 +420,98 @@ def cmd_not_odoo(db_name: Annotated[str, typer.Argument(metavar="DB")]):
                 w.table(["procedure"], [[p] for p in procedures])
             else:
                 w.text("(none)")
+
+
+# ---------------------------------------------------------------------------
+# prepare-audit
+# ---------------------------------------------------------------------------
+
+
+def _compact_stats(stats_data: dict) -> dict:
+    """Shrink stats payload for audit export.
+
+    - empty tables (records == 0): keep only `table`, `model`, `total_size_bytes`
+    - non-empty tables: drop `table_size_bytes` (redundant); drop
+      `index_size_bytes`, `attachment_size_bytes`, and `year_counts` entries
+      whose values are zero; drop `year_counts` entirely when all years zero
+    """
+    compact_tables = []
+    for t in stats_data["tables"]:
+        if t["total_records"] == 0:
+            compact_tables.append({
+                "table": t["table"],
+                "model": t["model"],
+                "total_size_bytes": t["total_size_bytes"],
+            })
+            continue
+        entry = {
+            "table": t["table"],
+            "model": t["model"],
+            "total_records": t["total_records"],
+            "total_size_bytes": t["total_size_bytes"],
+        }
+        if t["index_size_bytes"]:
+            entry["index_size_bytes"] = t["index_size_bytes"]
+        if t["attachment_size_bytes"]:
+            entry["attachment_size_bytes"] = t["attachment_size_bytes"]
+        year_counts = {y: c for y, c in t["year_counts"].items() if c > 0}
+        if year_counts:
+            entry["year_counts"] = year_counts
+        compact_tables.append(entry)
+    return {
+        "db_size": stats_data["db_size"],
+        "years": stats_data["years"],
+        "tables": compact_tables,
+    }
+
+
+@app.command(name="prepare-audit")
+def cmd_prepare_audit(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    years: Annotated[int, typer.Option("--years", "-y", help="Years for stats breakdown")] = 3,
+    top: Annotated[int, typer.Option("--top", "-n", help="Top tables by size to include (0 = all)")] = 0,
+):
+    """Combine summary + modules + stats + not-odoo into a $db.json audit export.
+
+    Output goes to audits/$db.json by default (gitignored); override with
+    --output-file. Always written as JSON regardless of --output-format. Intended
+    as input for the /odoo-dev:audit-db skill.
+
+    Stats payload is compacted: empty tables drop year_counts/index/attachment
+    fields; non-empty tables drop zero year entries. Consumers should use
+    `.get(key, 0)` for the dropped fields.
+    """
+    with _handle_errors(db_name):
+        summary = db.get_db_summary(db_name, verbose=True)
+        if summary is None:
+            typer.echo(f"Error [{db_name}]: not an Odoo database", err=True)
+            raise typer.Exit(1)
+        modules_data = db.get_modules(db_name)
+        stats_data = db.get_stats(db_name, years=years, top=top)
+        not_odoo_data = db.get_not_odoo(db_name)
+
+    payload = {
+        "db": summary.name,
+        "version": summary.version,
+        "neutralized": summary.neutralized,
+        "module_count": summary.module_count,
+        "user_count": summary.user_count,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "modules": modules_data,
+        "stats": _compact_stats(stats_data),
+        "not_odoo": not_odoo_data,
+    }
+
+    target = _output_file if _output_file is not None else f"audits/{db_name}.json"
+    Path(target).parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+    typer.echo(
+        f"Wrote {target} "
+        f"(modules={len(modules_data)}, tables={len(stats_data['tables'])}, "
+        f"views={len(not_odoo_data['views'])}, triggers={len(not_odoo_data['triggers'])}, "
+        f"functions={len(not_odoo_data['functions'])}, procedures={len(not_odoo_data['procedures'])})"
+    )
 
 
 if __name__ == "__main__":

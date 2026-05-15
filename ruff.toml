@@ -1,4 +1,4 @@
-target-version = "py312"
+target-version = "py310"
 line-length = 120
 fix = true
 

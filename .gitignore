@@ -221,3 +221,6 @@ plans/
 
 # Logs
 logs/*.log
+
+# Audit exports (prepare-audit output)
+audits/*.json
