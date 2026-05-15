@@ -222,5 +222,5 @@ plans/
 # Logs
 logs/*.log
 
-# Audit exports (prepare-audit output)
-audits/*.json
+# Audit exports (prepare-audit output) — written next to wherever the tool runs
+/*.json

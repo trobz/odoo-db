@@ -53,7 +53,7 @@ odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log
 | `locks <db>` | Active DB locks (blocked/blocking PIDs + queries) |
 | `stats <db>` | Per-table record counts and sizes by year; `--years N` (default 3), `--top N` (default 20) |
 | `not-odoo <db>` | Show non-Odoo objects: custom views (not in ir_model), triggers, functions, and stored procedures |
-| `prepare-audit <db>` | Bundle summary + modules + stats + not-odoo into `audits/<db>.json` for `/odoo-dev:audit-db` skill; `--years N` (default 3), `--top N` (default 0 = all tables); always JSON; default path `audits/<db>.json` (gitignored), override with `--output-file` |
+| `prepare-audit <db>` | Bundle summary + modules + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` skill; `--years N` (default 3), `--top N` (default 0 = all tables); always JSON; override path with `--output-file` |
 
 **Key SQL for `list`:**
 ```sql
@@ -96,5 +96,5 @@ make test      # Run pytest
 - `pyproject.toml` — Dependencies and build config
 - `ruff.toml` — Linter/formatter rules
 - `logs/` — Log output directory (`.gitkeep` tracked, `*.log` gitignored)
-- `audits/` — `prepare-audit` JSON exports (`.gitkeep` tracked, `*.json` gitignored)
+- `prepare-audit` writes `<db>.json` to the current working directory; `/*.json` at the repo root is gitignored so local audit dumps stay untracked when running from the source tree.
 - `tests/` — Test suite (pytest)

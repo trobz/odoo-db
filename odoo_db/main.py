@@ -473,9 +473,9 @@ def cmd_prepare_audit(
 ):
     """Combine summary + modules + stats + not-odoo into a $db.json audit export.
 
-    Output goes to audits/$db.json by default (gitignored); override with
-    --output-file. Always written as JSON regardless of --output-format. Intended
-    as input for the /odoo-dev:audit-db skill.
+    Output goes to ./$db.json by default; override with --output-file. Always
+    written as JSON regardless of --output-format. Intended as input for the
+    /odoo-dev:audit-db skill.
 
     Stats payload is compacted: empty tables drop year_counts/index/attachment
     fields; non-empty tables drop zero year entries. Consumers should use
@@ -502,8 +502,10 @@ def cmd_prepare_audit(
         "not_odoo": not_odoo_data,
     }
 
-    target = _output_file if _output_file is not None else f"audits/{db_name}.json"
-    Path(target).parent.mkdir(parents=True, exist_ok=True)
+    target = _output_file if _output_file is not None else f"{db_name}.json"
+    parent = Path(target).parent
+    if str(parent) not in ("", "."):
+        parent.mkdir(parents=True, exist_ok=True)
     with open(target, "w") as f:
         json.dump(payload, f, indent=2, default=str)
     typer.echo(
