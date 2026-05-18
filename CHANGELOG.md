@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-05-18)
+
+### Features
+
+- Add authoritative model_owners map to prepare-audit bundle
+  ([`b487d20`](https://github.com/trobz/odoo-db/commit/b487d20142647eb92cbeaedbdd24d1d3eb13a83a))
+
+### Refactoring
+
+- Write prepare-audit output to the current directory by default
+  ([`5762b18`](https://github.com/trobz/odoo-db/commit/5762b184e28989275bfd93817b4b9fe428a7d2e1))
+
+
 ## v1.4.0 (2026-05-15)
 
 ### Features
