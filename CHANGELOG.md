@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-05-18)
+
+### Features
+
+- Add orphan_tables to prepare-audit bundle
+  ([`a71b066`](https://github.com/trobz/odoo-db/commit/a71b0667b78ace8c85c2e801a00baccbc91bf091))
+
+- Tag recognized infra in not-odoo output
+  ([`c794da7`](https://github.com/trobz/odoo-db/commit/c794da742de53dadd82c966dc503099a0b5fb8e9))
+
+
 ## v1.5.0 (2026-05-18)
 
 ### Features
