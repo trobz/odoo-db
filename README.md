@@ -46,7 +46,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `locks <db>` | Show active PostgreSQL locks |
 | `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`) |
 | `not-odoo <db>` | Show non-Odoo database objects: custom views, triggers, functions, and stored procedures |
-| `prepare-audit <db>` | Combine summary + modules + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables) |
+| `prepare-audit <db>` | Combine summary + modules + model→owner map + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables) |
 
 ## Examples
 

@@ -53,7 +53,7 @@ odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log
 | `locks <db>` | Active DB locks (blocked/blocking PIDs + queries) |
 | `stats <db>` | Per-table record counts and sizes by year; `--years N` (default 3), `--top N` (default 20) |
 | `not-odoo <db>` | Show non-Odoo objects: custom views (not in ir_model), triggers, functions, and stored procedures |
-| `prepare-audit <db>` | Bundle summary + modules + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` skill; `--years N` (default 3), `--top N` (default 0 = all tables); always JSON; override path with `--output-file` |
+| `prepare-audit <db>` | Bundle summary + modules + model→owner map + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` skill; `--years N` (default 3), `--top N` (default 0 = all tables); always JSON; override path with `--output-file`. The `model_owners` map comes from `ir_model_data` + `ir_model_relation` (authoritative, not a heuristic) |
 
 **Key SQL for `list`:**
 ```sql
