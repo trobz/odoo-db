@@ -394,6 +394,44 @@ def get_not_odoo(dbname: str) -> dict:
         }
 
 
+def get_orphan_tables(
+    stats_tables: list[dict], model_owners: dict[str, str], installed_modules: list[dict]
+) -> list[dict]:
+    """Return tables not owned by any currently-installed module.
+
+    Two distinct reasons land a table here, kept on the same field so audit
+    consumers see one authoritative "orphan" list, with ``reason`` discriminating
+    follow-up actions:
+
+    - ``uninstalled_module`` — ``model_owners`` resolves the table to a module
+      that is **not** in the installed-module list. Tables left over from a
+      module that was uninstalled without dropping its schema. Primary
+      migration-cleanup target. Entry includes ``owner_module``.
+    - ``no_ownership_data`` — the table has **no** entry in ``model_owners``.
+      Typically legacy / raw-SQL / custom tables created outside Odoo's ORM,
+      or tables from an older Odoo version with stale ``ir_model_data``.
+      Consumers may apply a longest-prefix heuristic to attribute them to a
+      best-guess module. ``owner_module`` is omitted (unknown by definition).
+    """
+    installed = {m["name"] for m in installed_modules}
+    orphans: list[dict] = []
+    for t in stats_tables:
+        table = t["table"]
+        entry: dict = {"table": table}
+        if table in model_owners:
+            owner = model_owners[table]
+            if owner in installed:
+                continue
+            entry["owner_module"] = owner
+            entry["reason"] = "uninstalled_module"
+        else:
+            entry["reason"] = "no_ownership_data"
+        entry["total_records"] = t.get("total_records", 0)
+        entry["total_size_bytes"] = t.get("total_size_bytes", 0)
+        orphans.append(entry)
+    return orphans
+
+
 def get_locks(dbname: str) -> dict:
     with connect(dbname) as conn, conn.cursor() as cur:
         cur.execute(
