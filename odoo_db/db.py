@@ -28,6 +28,16 @@ _BASE_TABLE_NAME_OVERRIDES: dict[str, str] = {
     "ir_act_url": "base",
 }
 
+# Non-Odoo objects that are nonetheless legitimate / expected, so audit
+# consumers can distinguish them from genuinely custom additions. Extend
+# only with widely-deployed objects whose origin is unambiguous.
+_RECOGNIZED_FUNCTIONS: dict[str, str] = {
+    "unaccent": "Postgres unaccent extension wrapper (Odoo uses it for accent-insensitive search).",
+}
+_RECOGNIZED_TRIGGERS: dict[str, str] = {
+    "queue_job_notify": "OCA queue_job module — NOTIFY trigger on queue_job inserts.",
+}
+
 
 @contextmanager
 def connect(dbname: str):
@@ -386,11 +396,19 @@ def get_not_odoo(dbname: str) -> dict:
         functions = [row[0] for row in routines if row[1] == "f"]
         procedures = [row[0] for row in routines if row[1] == "p"]
 
+        recognized = {
+            "functions": {n: _RECOGNIZED_FUNCTIONS[n] for n in functions if n in _RECOGNIZED_FUNCTIONS},
+            "triggers": {
+                t["name"]: _RECOGNIZED_TRIGGERS[t["name"]] for t in triggers if t["name"] in _RECOGNIZED_TRIGGERS
+            },
+        }
+
         return {
             "views": views,
             "triggers": triggers,
             "functions": functions,
             "procedures": procedures,
+            "recognized": recognized,
         }
 
 
