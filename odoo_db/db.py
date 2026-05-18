@@ -13,6 +13,21 @@ logger = logging.getLogger(__name__)
 
 _progress_console = Console(stderr=True)
 
+# Odoo core models whose `_table` attribute overrides the default
+# `replace(model, '.', '_')` and therefore can't be recovered from `ir_model`
+# alone. All seven live in `base`. Verified against odoo/addons/base/models/
+# ir_actions.py and ir_actions_report.py — this list is stable across recent
+# Odoo versions (14 → 19). Extend only if a new core override is observed.
+_BASE_TABLE_NAME_OVERRIDES: dict[str, str] = {
+    "ir_actions": "base",
+    "ir_act_window": "base",
+    "ir_act_window_view": "base",
+    "ir_act_server": "base",
+    "ir_act_report_xml": "base",
+    "ir_act_client": "base",
+    "ir_act_url": "base",
+}
+
 
 @contextmanager
 def connect(dbname: str):
@@ -91,6 +106,60 @@ def get_modules(dbname: str) -> list[dict]:
                 ORDER BY name
             """)
         return [{"name": row[0], "version": row[1] or ""} for row in cur.fetchall()]
+
+
+def get_model_owners(dbname: str) -> dict[str, str]:
+    """Return ``{table_name: owning_module}`` derived from Odoo's own registry.
+
+    Sources, in precedence order (first wins):
+
+    1. ``ir_model_data`` joined to ``ir_model`` — authoritative for regular
+       models. When module X declares **or extends** a model, Odoo writes a
+       row with ``model='ir.model'``, ``module=X``, ``res_id=<ir_model.id>``,
+       and ``name='model_<table>'``. Multiple modules may therefore write
+       rows for the same model. Since Odoo installs modules in topological
+       dependency order (``base`` first, then everything else), the row with
+       the smallest ``ir_model_data.id`` per model corresponds to the module
+       that *originally declared* it — that's the one we keep, via
+       ``DISTINCT ON``.
+    2. ``ir_model_relation`` — many-to-many relation tables (which have no
+       ``ir_model`` row of their own) are tracked here with a direct FK to
+       ``ir_module_module``. When several modules declare the same relation,
+       we keep the earliest one (smallest ``ir_model_relation.id``).
+
+    Tables with no entry in either source (legacy / raw-SQL / orphans from
+    uninstalled modules) are simply absent from the returned dict — callers
+    decide how to handle them (typically fall back to a prefix heuristic).
+    """
+    with connect(dbname) as conn, conn.cursor() as cur:
+        owners: dict[str, str] = {}
+
+        cur.execute("""
+            SELECT DISTINCT ON (im.id)
+                replace(im.model, '.', '_') AS tablename,
+                imd.module
+            FROM ir_model im
+            JOIN ir_model_data imd
+              ON imd.model = 'ir.model' AND imd.res_id = im.id
+            ORDER BY im.id, imd.id
+        """)
+        for tablename, module in cur.fetchall():
+            owners[tablename] = module
+
+        cur.execute("""
+            SELECT DISTINCT ON (r.name)
+                r.name, m.name
+            FROM ir_model_relation r
+            JOIN ir_module_module m ON r.module = m.id
+            ORDER BY r.name, r.id
+        """)
+        for tablename, module in cur.fetchall():
+            owners.setdefault(tablename, module)
+
+        for tablename, module in _BASE_TABLE_NAME_OVERRIDES.items():
+            owners.setdefault(tablename, module)
+
+        return owners
 
 
 def get_crons(dbname: str) -> list[dict]:
