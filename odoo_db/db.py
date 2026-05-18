@@ -28,6 +28,16 @@ _BASE_TABLE_NAME_OVERRIDES: dict[str, str] = {
     "ir_act_url": "base",
 }
 
+# Non-Odoo objects that are nonetheless legitimate / expected, so audit
+# consumers can distinguish them from genuinely custom additions. Extend
+# only with widely-deployed objects whose origin is unambiguous.
+_RECOGNIZED_FUNCTIONS: dict[str, str] = {
+    "unaccent": "Postgres unaccent extension wrapper (Odoo uses it for accent-insensitive search).",
+}
+_RECOGNIZED_TRIGGERS: dict[str, str] = {
+    "queue_job_notify": "OCA queue_job module — NOTIFY trigger on queue_job inserts.",
+}
+
 
 @contextmanager
 def connect(dbname: str):
@@ -386,12 +396,58 @@ def get_not_odoo(dbname: str) -> dict:
         functions = [row[0] for row in routines if row[1] == "f"]
         procedures = [row[0] for row in routines if row[1] == "p"]
 
+        recognized = {
+            "functions": {n: _RECOGNIZED_FUNCTIONS[n] for n in functions if n in _RECOGNIZED_FUNCTIONS},
+            "triggers": {
+                t["name"]: _RECOGNIZED_TRIGGERS[t["name"]] for t in triggers if t["name"] in _RECOGNIZED_TRIGGERS
+            },
+        }
+
         return {
             "views": views,
             "triggers": triggers,
             "functions": functions,
             "procedures": procedures,
+            "recognized": recognized,
         }
+
+
+def get_orphan_tables(
+    stats_tables: list[dict], model_owners: dict[str, str], installed_modules: list[dict]
+) -> list[dict]:
+    """Return tables not owned by any currently-installed module.
+
+    Two distinct reasons land a table here, kept on the same field so audit
+    consumers see one authoritative "orphan" list, with ``reason`` discriminating
+    follow-up actions:
+
+    - ``uninstalled_module`` — ``model_owners`` resolves the table to a module
+      that is **not** in the installed-module list. Tables left over from a
+      module that was uninstalled without dropping its schema. Primary
+      migration-cleanup target. Entry includes ``owner_module``.
+    - ``no_ownership_data`` — the table has **no** entry in ``model_owners``.
+      Typically legacy / raw-SQL / custom tables created outside Odoo's ORM,
+      or tables from an older Odoo version with stale ``ir_model_data``.
+      Consumers may apply a longest-prefix heuristic to attribute them to a
+      best-guess module. ``owner_module`` is omitted (unknown by definition).
+    """
+    installed = {m["name"] for m in installed_modules}
+    orphans: list[dict] = []
+    for t in stats_tables:
+        table = t["table"]
+        entry: dict = {"table": table}
+        if table in model_owners:
+            owner = model_owners[table]
+            if owner in installed:
+                continue
+            entry["owner_module"] = owner
+            entry["reason"] = "uninstalled_module"
+        else:
+            entry["reason"] = "no_ownership_data"
+        entry["total_records"] = t.get("total_records", 0)
+        entry["total_size_bytes"] = t.get("total_size_bytes", 0)
+        orphans.append(entry)
+    return orphans
 
 
 def get_locks(dbname: str) -> dict:

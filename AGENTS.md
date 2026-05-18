@@ -52,8 +52,8 @@ odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log
 | `users <db>` | Active users with connection status (via bus_presence if available) |
 | `locks <db>` | Active DB locks (blocked/blocking PIDs + queries) |
 | `stats <db>` | Per-table record counts and sizes by year; `--years N` (default 3), `--top N` (default 20) |
-| `not-odoo <db>` | Show non-Odoo objects: custom views (not in ir_model), triggers, functions, and stored procedures |
-| `prepare-audit <db>` | Bundle summary + modules + model→owner map + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` skill; `--years N` (default 3), `--top N` (default 0 = all tables); always JSON; override path with `--output-file`. The `model_owners` map comes from `ir_model_data` + `ir_model_relation` (authoritative, not a heuristic) |
+| `not-odoo <db>` | Show non-Odoo objects: custom views (not in ir_model), triggers, functions, and stored procedures. Each trigger/function is tagged `recognized` (known infra like `unaccent`, `queue_job_notify`) or `custom`; the JSON payload exposes the allowlist under `recognized.functions` / `recognized.triggers` |
+| `prepare-audit <db>` | Bundle summary + modules + `model_owners` + `orphan_tables` + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` skill; `--years N` (default 3), `--top N` (default 0 = all tables); always JSON; override path with `--output-file`. `model_owners` comes from `ir_model_data` + `ir_model_relation` (authoritative, not a heuristic). `orphan_tables` flags tables not owned by any installed module, with `reason: uninstalled_module` (owner uninstalled) or `reason: no_ownership_data` (no `ir_model_data` row — legacy/raw-SQL/custom) |
 
 **Key SQL for `list`:**
 ```sql

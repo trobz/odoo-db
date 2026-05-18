@@ -45,8 +45,8 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `users <db>` | List active users with connection status |
 | `locks <db>` | Show active PostgreSQL locks |
 | `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`) |
-| `not-odoo <db>` | Show non-Odoo database objects: custom views, triggers, functions, and stored procedures |
-| `prepare-audit <db>` | Combine summary + modules + model→owner map + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables) |
+| `not-odoo <db>` | Show non-Odoo database objects: custom views, triggers, functions, and stored procedures. Triggers/functions are tagged `recognized` (known infra: `unaccent`, `queue_job_notify`, …) or `custom` |
+| `prepare-audit <db>` | Bundle summary + modules + `model_owners` + `orphan_tables` + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables). `orphan_tables` flags tables not owned by any installed module (reason: `uninstalled_module` or `no_ownership_data`) |
 
 ## Examples
 

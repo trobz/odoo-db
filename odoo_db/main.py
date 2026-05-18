@@ -370,21 +370,26 @@ def cmd_not_odoo(db_name: Annotated[str, typer.Argument(metavar="DB")]):
     triggers = data["triggers"]
     functions = data["functions"]
     procedures = data["procedures"]
+    recognized = data.get("recognized", {"functions": {}, "triggers": {}})
+    rec_fn = recognized.get("functions", {})
+    rec_tr = recognized.get("triggers", {})
 
     with _writer() as w:
         if w.fmt == "json":
             w.json(data)
         elif w.fmt == "prometheus":
+            custom_fn = sum(1 for n in functions if n not in rec_fn)
+            custom_tr = sum(1 for t in triggers if t["name"] not in rec_tr)
             lines = [
                 "# HELP odoo_db_custom_views Custom (non-Odoo) view count",
                 "# TYPE odoo_db_custom_views gauge",
                 f'odoo_db_custom_views{{db="{db_name}"}} {len(views)}',
-                "# HELP odoo_db_custom_triggers Custom trigger count",
+                "# HELP odoo_db_custom_triggers Custom trigger count (excludes recognized infra)",
                 "# TYPE odoo_db_custom_triggers gauge",
-                f'odoo_db_custom_triggers{{db="{db_name}"}} {len(triggers)}',
-                "# HELP odoo_db_custom_functions Custom (non-extension) function count",
+                f'odoo_db_custom_triggers{{db="{db_name}"}} {custom_tr}',
+                "# HELP odoo_db_custom_functions Custom function count (excludes recognized infra)",
                 "# TYPE odoo_db_custom_functions gauge",
-                f'odoo_db_custom_functions{{db="{db_name}"}} {len(functions)}',
+                f'odoo_db_custom_functions{{db="{db_name}"}} {custom_fn}',
                 "# HELP odoo_db_custom_procedures Custom stored procedure count",
                 "# TYPE odoo_db_custom_procedures gauge",
                 f'odoo_db_custom_procedures{{db="{db_name}"}} {len(procedures)}',
@@ -401,8 +406,17 @@ def cmd_not_odoo(db_name: Annotated[str, typer.Argument(metavar="DB")]):
             w.text(f"=== Triggers ({len(triggers)}) ===")
             if triggers:
                 w.table(
-                    ["table", "trigger", "timing", "events"],
-                    [[t["table"], t["name"], t["timing"], t["events"]] for t in triggers],
+                    ["table", "trigger", "timing", "events", "kind"],
+                    [
+                        [
+                            t["table"],
+                            t["name"],
+                            t["timing"],
+                            t["events"],
+                            "recognized" if t["name"] in rec_tr else "custom",
+                        ]
+                        for t in triggers
+                    ],
                 )
             else:
                 w.text("(none)")
@@ -410,7 +424,10 @@ def cmd_not_odoo(db_name: Annotated[str, typer.Argument(metavar="DB")]):
             w.text("")
             w.text(f"=== Functions ({len(functions)}) ===")
             if functions:
-                w.table(["function"], [[f] for f in functions])
+                w.table(
+                    ["function", "kind"],
+                    [[f, "recognized" if f in rec_fn else "custom"] for f in functions],
+                )
             else:
                 w.text("(none)")
 
@@ -490,6 +507,7 @@ def cmd_prepare_audit(
         stats_data = db.get_stats(db_name, years=years, top=top)
         not_odoo_data = db.get_not_odoo(db_name)
         model_owners = db.get_model_owners(db_name)
+        orphan_tables = db.get_orphan_tables(stats_data["tables"], model_owners, modules_data)
 
     payload = {
         "db": summary.name,
@@ -500,6 +518,7 @@ def cmd_prepare_audit(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "modules": modules_data,
         "model_owners": model_owners,
+        "orphan_tables": orphan_tables,
         "stats": _compact_stats(stats_data),
         "not_odoo": not_odoo_data,
     }
@@ -513,7 +532,7 @@ def cmd_prepare_audit(
     typer.echo(
         f"Wrote {target} "
         f"(modules={len(modules_data)}, owners={len(model_owners)}, "
-        f"tables={len(stats_data['tables'])}, "
+        f"tables={len(stats_data['tables'])}, orphans={len(orphan_tables)}, "
         f"views={len(not_odoo_data['views'])}, triggers={len(not_odoo_data['triggers'])}, "
         f"functions={len(not_odoo_data['functions'])}, procedures={len(not_odoo_data['procedures'])})"
     )
