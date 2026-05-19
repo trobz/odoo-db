@@ -80,8 +80,8 @@ def cmd_list(
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ):
     """List all Odoo databases: name, version, neutralized status."""
-    with _handle_errors("postgres"):
-        names = db.list_databases()
+    with _handle_errors("postgres"), db.cursor("postgres") as cur:
+        names = db.list_databases(cur)
     summaries = [s for name in names if (s := db.get_db_summary(name, verbose=verbose))]
 
     with _writer() as w:
@@ -130,8 +130,8 @@ def cmd_list(
 @app.command()
 def modules(db_name: Annotated[str, typer.Argument(metavar="DB")]):
     """List installed modules with version for a database."""
-    with _handle_errors(db_name):
-        rows_data = db.get_modules(db_name)
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        rows_data = db.get_modules(cur)
 
     with _writer() as w:
         if w.fmt == "json":
@@ -155,8 +155,8 @@ def modules(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 @app.command()
 def crons(db_name: Annotated[str, typer.Argument(metavar="DB")]):
     """List active scheduled actions for a database."""
-    with _handle_errors(db_name):
-        rows_data = db.get_crons(db_name)
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        rows_data = db.get_crons(cur)
 
     with _writer() as w:
         if w.fmt == "json":
@@ -183,8 +183,8 @@ def crons(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 @app.command()
 def jobs(db_name: Annotated[str, typer.Argument(metavar="DB")]):
     """List queue job counts by state for a database."""
-    with _handle_errors(db_name):
-        rows_data = db.get_jobs(db_name)
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        rows_data = db.get_jobs(cur)
 
     with _writer() as w:
         if rows_data is None:
@@ -216,8 +216,8 @@ def jobs(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 @app.command()
 def users(db_name: Annotated[str, typer.Argument(metavar="DB")]):
     """List active users for a database."""
-    with _handle_errors(db_name):
-        rows_data = db.get_users(db_name)
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        rows_data = db.get_users(cur)
 
     with _writer() as w:
         if w.fmt == "json":
@@ -248,8 +248,8 @@ def users(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 @app.command()
 def locks(db_name: Annotated[str, typer.Argument(metavar="DB")]):
     """Show active database locks for a database."""
-    with _handle_errors(db_name):
-        data = db.get_locks(db_name)
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        data = db.get_locks(cur, db_name)
 
     with _writer() as w:
         if w.fmt == "json":
@@ -299,8 +299,9 @@ def stats(
     top: Annotated[int, typer.Option("--top", "-n", help="Number of top tables to show")] = 20,
 ):
     """Show per-table record counts and sizes for a database."""
-    with _handle_errors(db_name):
-        data = db.get_stats(db_name, years=years, top=top)
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        model_owners = db.get_model_owners(cur)
+        data = db.get_stats(cur, years=years, top=top, model_owners=model_owners)
 
     year_cols = data["years"]
     tables = data["tables"]
@@ -363,8 +364,8 @@ def stats(
 @app.command(name="not-odoo")
 def cmd_not_odoo(db_name: Annotated[str, typer.Argument(metavar="DB")]):
     """Show non-Odoo database objects: custom views, triggers, and functions."""
-    with _handle_errors(db_name):
-        data = db.get_not_odoo(db_name)
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        data = db.get_not_odoo(cur)
 
     views = data["views"]
     triggers = data["triggers"]
@@ -447,7 +448,8 @@ def cmd_not_odoo(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 def _compact_stats(stats_data: dict) -> dict:
     """Shrink stats payload for audit export.
 
-    - empty tables (records == 0): keep only `table`, `model`, `total_size_bytes`
+    - empty tables (records == 0): keep only `table`, `model`,
+      `functional_group`, `total_size_bytes`
     - non-empty tables: drop `table_size_bytes` (redundant); drop
       `index_size_bytes`, `attachment_size_bytes`, and `year_counts` entries
       whose values are zero; drop `year_counts` entirely when all years zero
@@ -458,12 +460,14 @@ def _compact_stats(stats_data: dict) -> dict:
             compact_tables.append({
                 "table": t["table"],
                 "model": t["model"],
+                "functional_group": t["functional_group"],
                 "total_size_bytes": t["total_size_bytes"],
             })
             continue
         entry = {
             "table": t["table"],
             "model": t["model"],
+            "functional_group": t["functional_group"],
             "total_records": t["total_records"],
             "total_size_bytes": t["total_size_bytes"],
         }
@@ -503,10 +507,12 @@ def cmd_prepare_audit(
         if summary is None:
             typer.echo(f"Error [{db_name}]: not an Odoo database", err=True)
             raise typer.Exit(1)
-        modules_data = db.get_modules(db_name)
-        stats_data = db.get_stats(db_name, years=years, top=top)
-        not_odoo_data = db.get_not_odoo(db_name)
-        model_owners = db.get_model_owners(db_name)
+        with db.cursor(db_name) as cur:
+            modules_data = db.get_modules(cur)
+            model_owners = db.get_model_owners(cur)
+            stats_data = db.get_stats(cur, years=years, top=top, model_owners=model_owners)
+            not_odoo_data = db.get_not_odoo(cur)
+            users_by_year = db.get_users_by_year(cur)
         orphan_tables = db.get_orphan_tables(stats_data["tables"], model_owners, modules_data)
 
     payload = {
@@ -519,6 +525,7 @@ def cmd_prepare_audit(
         "modules": modules_data,
         "model_owners": model_owners,
         "orphan_tables": orphan_tables,
+        "users_by_year": users_by_year,
         "stats": _compact_stats(stats_data),
         "not_odoo": not_odoo_data,
     }
@@ -533,6 +540,7 @@ def cmd_prepare_audit(
         f"Wrote {target} "
         f"(modules={len(modules_data)}, owners={len(model_owners)}, "
         f"tables={len(stats_data['tables'])}, orphans={len(orphan_tables)}, "
+        f"user_years={len(users_by_year)}, "
         f"views={len(not_odoo_data['views'])}, triggers={len(not_odoo_data['triggers'])}, "
         f"functions={len(not_odoo_data['functions'])}, procedures={len(not_odoo_data['procedures'])})"
     )
