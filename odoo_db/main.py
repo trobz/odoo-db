@@ -508,6 +508,7 @@ def cmd_prepare_audit(
         not_odoo_data = db.get_not_odoo(db_name)
         model_owners = db.get_model_owners(db_name)
         orphan_tables = db.get_orphan_tables(stats_data["tables"], model_owners, modules_data)
+        users_by_year = db.get_users_by_year(db_name)
 
     payload = {
         "db": summary.name,
@@ -519,6 +520,7 @@ def cmd_prepare_audit(
         "modules": modules_data,
         "model_owners": model_owners,
         "orphan_tables": orphan_tables,
+        "users_by_year": users_by_year,
         "stats": _compact_stats(stats_data),
         "not_odoo": not_odoo_data,
     }
@@ -533,6 +535,7 @@ def cmd_prepare_audit(
         f"Wrote {target} "
         f"(modules={len(modules_data)}, owners={len(model_owners)}, "
         f"tables={len(stats_data['tables'])}, orphans={len(orphan_tables)}, "
+        f"user_years={len(users_by_year)}, "
         f"views={len(not_odoo_data['views'])}, triggers={len(not_odoo_data['triggers'])}, "
         f"functions={len(not_odoo_data['functions'])}, procedures={len(not_odoo_data['procedures'])})"
     )

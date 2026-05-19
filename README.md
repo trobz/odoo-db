@@ -44,9 +44,9 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `jobs <db>` | Queue job counts by state (requires `queue_job` module) |
 | `users <db>` | List active users with connection status |
 | `locks <db>` | Show active PostgreSQL locks |
-| `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`) |
+| `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`). Tables with 0-byte heap are reported as empty without running `count(*)` |
 | `not-odoo <db>` | Show non-Odoo database objects: custom views, triggers, functions, and stored procedures. Triggers/functions are tagged `recognized` (known infra: `unaccent`, `queue_job_notify`, …) or `custom` |
-| `prepare-audit <db>` | Bundle summary + modules + `model_owners` + `orphan_tables` + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables). `orphan_tables` flags tables not owned by any installed module (reason: `uninstalled_module` or `no_ownership_data`) |
+| `prepare-audit <db>` | Bundle summary + modules + `model_owners` + `orphan_tables` + `users_by_year` + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables). `orphan_tables` flags tables not owned by any installed module (reason: `uninstalled_module` or `no_ownership_data`). `users_by_year` is an aggregate `{year: count}` of active users by `create_date` year — zero PII so the file can ship without an NDA |
 
 ## Examples
 

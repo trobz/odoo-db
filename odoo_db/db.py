@@ -239,6 +239,23 @@ def get_users(dbname: str) -> list[dict]:
         return [{"login": row[0], "name": row[1] or "", "state": row[2]} for row in cur.fetchall()]
 
 
+def get_users_by_year(dbname: str) -> dict[int, int]:
+    """Return ``{year: count}`` for active users grouped by ``create_date`` year.
+
+    Aggregate only — no PII (no login/name/email). Designed for audit export
+    so leads can ship the file without an NDA.
+    """
+    with connect(dbname) as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT EXTRACT(year FROM create_date)::int AS yr, count(*)
+            FROM res_users
+            WHERE active = true AND create_date IS NOT NULL
+            GROUP BY yr
+            ORDER BY yr
+        """)
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+
 def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
     with connect(dbname) as conn, conn.cursor() as cur:
         # All Odoo tables (have create_date)
@@ -278,7 +295,10 @@ def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
         current_year = cur.fetchone()[0]
         year_cols = list(range(current_year - years + 1, current_year + 1))
 
-        # Per-table queries: year_counts + total count, with progress bar on stderr
+        # Per-table queries: year_counts + total count, with progress bar on stderr.
+        # Skip count queries when the heap is 0 bytes — assume empty, save the
+        # round-trip on databases with many empty tables.
+        table_bytes_by_relname = {row[0]: row[2] for row in size_rows}
         table_year_counts: dict[str, dict[int, int]] = {}
         total_counts: dict[str, int] = {}
         for table in track(
@@ -287,6 +307,10 @@ def get_stats(dbname: str, years: int = 3, top: int = 20) -> dict:
             console=_progress_console,
             transient=True,
         ):
+            if table_bytes_by_relname.get(table, 0) == 0:
+                table_year_counts[table] = {}
+                total_counts[table] = 0
+                continue
             cur.execute(
                 sql.SQL("""
                     SELECT EXTRACT(year FROM create_date)::int AS yr, count(*)
