@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.7.0 (2026-05-19)
+
+### Features
+
+- Add functional_group to every table; table-prefix primary
+  ([`e1e250e`](https://github.com/trobz/odoo-db/commit/e1e250ed8c7cc7e08fa99ca02d3dfa9763231401))
+
+- Add users_by_year and skip count on empty tables
+  ([`316c26b`](https://github.com/trobz/odoo-db/commit/316c26ba34224c92ffe57e223bf7dacc7d74d76a))
+
+### Refactoring
+
+- Pass cursor into db helpers, share one conn in prepare-audit
+  ([`7b76006`](https://github.com/trobz/odoo-db/commit/7b760063977da0cef3ce74247c13a4d7e1552002))
+
+
 ## v1.6.0 (2026-05-18)
 
 ### Features

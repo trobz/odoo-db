@@ -416,7 +416,7 @@ wheels = [
 
 [[package]]
 name = "odoo-db"
-version = "1.6.0"
+version = "1.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "psycopg", extra = ["binary"] },
