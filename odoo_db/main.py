@@ -300,7 +300,8 @@ def stats(
 ):
     """Show per-table record counts and sizes for a database."""
     with _handle_errors(db_name), db.cursor(db_name) as cur:
-        data = db.get_stats(cur, years=years, top=top)
+        model_owners = db.get_model_owners(cur)
+        data = db.get_stats(cur, years=years, top=top, model_owners=model_owners)
 
     year_cols = data["years"]
     tables = data["tables"]
@@ -447,7 +448,8 @@ def cmd_not_odoo(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 def _compact_stats(stats_data: dict) -> dict:
     """Shrink stats payload for audit export.
 
-    - empty tables (records == 0): keep only `table`, `model`, `total_size_bytes`
+    - empty tables (records == 0): keep only `table`, `model`,
+      `functional_group`, `total_size_bytes`
     - non-empty tables: drop `table_size_bytes` (redundant); drop
       `index_size_bytes`, `attachment_size_bytes`, and `year_counts` entries
       whose values are zero; drop `year_counts` entirely when all years zero
@@ -458,12 +460,14 @@ def _compact_stats(stats_data: dict) -> dict:
             compact_tables.append({
                 "table": t["table"],
                 "model": t["model"],
+                "functional_group": t["functional_group"],
                 "total_size_bytes": t["total_size_bytes"],
             })
             continue
         entry = {
             "table": t["table"],
             "model": t["model"],
+            "functional_group": t["functional_group"],
             "total_records": t["total_records"],
             "total_size_bytes": t["total_size_bytes"],
         }
@@ -505,9 +509,9 @@ def cmd_prepare_audit(
             raise typer.Exit(1)
         with db.cursor(db_name) as cur:
             modules_data = db.get_modules(cur)
-            stats_data = db.get_stats(cur, years=years, top=top)
-            not_odoo_data = db.get_not_odoo(cur)
             model_owners = db.get_model_owners(cur)
+            stats_data = db.get_stats(cur, years=years, top=top, model_owners=model_owners)
+            not_odoo_data = db.get_not_odoo(cur)
             users_by_year = db.get_users_by_year(cur)
         orphan_tables = db.get_orphan_tables(stats_data["tables"], model_owners, modules_data)
 

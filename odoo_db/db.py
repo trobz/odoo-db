@@ -70,6 +70,50 @@ def _fetch_one(cur: psycopg.Cursor) -> tuple:
     return row
 
 
+# Generic table-name prefixes that don't carry functional meaning on their
+# own — when a table starts with one of these we fall through to the second
+# component (e.g. ``wizard_payment_register`` → ``payment``).
+_NOISE_PREFIXES: frozenset[str] = frozenset({
+    "wizard",
+    "validate",
+    "report",
+    "mixin",
+    "abstract",
+    "tmp",
+    "temp",
+    "x",
+})
+
+
+def _functional_group(table: str, model_owners: dict[str, str] | None = None) -> str:
+    """Display-only functional bucket for a table name.
+
+    The table name itself is the strongest functional signal — a custom module
+    that extends MRP still uses ``mrp_*`` table names, so table-prefix is more
+    informative than the owning module's name (which might be e.g.
+    ``cpc_recycle_mrp``). Resolution order:
+
+    1. Split the table name on ``_``. If the leading component is a noise
+       prefix (``wizard``, ``report``, ``mixin``, …) and a second component
+       exists, use the second component — those prefixes describe table
+       *kind*, not functional area.
+    2. Otherwise, the first underscore component.
+    3. Only when the table has no underscore at all, fall back to the owner
+       module's first prefix from ``model_owners`` if available — single-word
+       tables carry no internal hint.
+
+    Never used for owner attribution — that's ``model_owners`` only.
+    """
+    parts = table.split("_")
+    if len(parts) > 1:
+        if parts[0] in _NOISE_PREFIXES:
+            return parts[1]
+        return parts[0]
+    if model_owners and table in model_owners:
+        return model_owners[table].split("_", 1)[0]
+    return parts[0]
+
+
 def _is_odoo(cur: psycopg.Cursor) -> bool:
     cur.execute("SELECT 1 FROM pg_tables WHERE tablename='ir_module_module'")
     return bool(cur.fetchone())
@@ -274,7 +318,12 @@ def get_users_by_year(cur: psycopg.Cursor) -> dict[int, int]:
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
-def get_stats(cur: psycopg.Cursor, years: int = 3, top: int = 20) -> dict:
+def get_stats(
+    cur: psycopg.Cursor,
+    years: int = 3,
+    top: int = 20,
+    model_owners: dict[str, str] | None = None,
+) -> dict:
     # All Odoo tables (have create_date)
     cur.execute("""
         SELECT c.relname
@@ -380,6 +429,7 @@ def get_stats(cur: psycopg.Cursor, years: int = 3, top: int = 20) -> dict:
         tables.append({
             "table": relname,
             "model": table_to_model.get(relname, ""),
+            "functional_group": _functional_group(relname, model_owners),
             "total_records": total_counts.get(relname, 0),
             "total_size_bytes": total_bytes,
             "table_size_bytes": table_bytes,
@@ -468,6 +518,11 @@ def get_orphan_tables(
       or tables from an older Odoo version with stale ``ir_model_data``.
       Consumers may apply a longest-prefix heuristic to attribute them to a
       best-guess module. ``owner_module`` is omitted (unknown by definition).
+
+    Each entry also carries a ``functional_group`` (first underscore component
+    of the table name). Not an owner — purely a bucket so the audit report can
+    group e.g. ``purchase_order`` + ``purchase_order_line`` under ``purchase``
+    when reasoning about functional areas.
     """
     installed = {m["name"] for m in installed_modules}
     orphans: list[dict] = []
@@ -482,6 +537,7 @@ def get_orphan_tables(
             entry["reason"] = "uninstalled_module"
         else:
             entry["reason"] = "no_ownership_data"
+        entry["functional_group"] = _functional_group(table, model_owners)
         entry["total_records"] = t.get("total_records", 0)
         entry["total_size_bytes"] = t.get("total_size_bytes", 0)
         orphans.append(entry)
