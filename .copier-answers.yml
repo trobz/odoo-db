@@ -1,9 +1,9 @@
 # Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
-_commit: v1.3.1
+_commit: v1.3.1-4-g19d3bb9
 _src_path: https://github.com/trobz/trobz-python-template.git
 author_email: moncoeur2k1@gmail.com
 author_username: duydoanh
-enable_docs_site: false
+enable_docs_site: true
 enable_github_action: true
 package_name: odoo_db
 project_description: Odoo databases management CLI tool

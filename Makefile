@@ -50,3 +50,13 @@ help:
 	[[print(f'\033[36m{m[0]:<20}\033[0m {m[1]}') for m in re.findall(r'^([a-zA-Z_-]+):.*?## (.*)$$', open(makefile).read(), re.M)] for makefile in ('$(MAKEFILE_LIST)').strip().split()]"
 
 .DEFAULT_GOAL := help
+
+.PHONY: docs
+docs: ## Build the documentation site
+	@echo "🚀 Building documentation site"
+	@uv run zensical build -f site-docs/zensical.toml
+
+.PHONY: docs-serve
+docs-serve: ## Serve the documentation site locally
+	@echo "🚀 Serving documentation site"
+	@uv run zensical serve -f site-docs/zensical.toml

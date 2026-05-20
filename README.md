@@ -97,4 +97,6 @@ odoo-db --output-file /tmp/audit.json prepare-audit my_db
 make install   # Install deps + pre-commit hooks
 make check     # Lint, format, type-check
 make test      # Run tests
+make docs      # Build the Zensical documentation site (site-docs/)
+make docs-serve  # Serve the docs locally
 ```
