@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.8.0 (2026-05-20)
+
+### Features
+
+- **docs**: Add VHS terminal demo for landing page
+  ([`f64e6f0`](https://github.com/trobz/odoo-db/commit/f64e6f0b5a1b32df23e58a784edc55dad3a4ca35))
+
+- **docs**: Scaffold site-docs landing + make docs targets
+  ([`d1b834e`](https://github.com/trobz/odoo-db/commit/d1b834e9fe55cad22214d8ce2e8b759cf1ac0506))
+
+
 ## v1.7.0 (2026-05-19)
 
 ### Features
