@@ -165,8 +165,9 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# mkdocs documentation
+# mkdocs / zensical documentation
 /site
+/site-docs/site
 
 # mypy
 .mypy_cache/
@@ -224,3 +225,7 @@ logs/*.log
 
 # Audit exports (prepare-audit output) — written next to wherever the tool runs
 /*.json
+
+# VIM files
+.*.sw?
+.*.un~

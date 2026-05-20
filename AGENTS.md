@@ -88,7 +88,14 @@ Run `make help` for all commands. Key ones:
 make install   # Install deps + pre-commit hooks
 make check     # Lint, format, type-check
 make test      # Run pytest
+make docs      # Build Zensical docs (site-docs/) → docs site at site-docs/site
+make docs-serve  # Serve docs locally with live reload
 ```
+
+The documentation site lives under `site-docs/` (Zensical, enabled via
+`enable_docs_site: true` in `.copier-answers.yml`). The landing page is
+overridden in `site-docs/overrides/landing.html`; `getting-started.md`
+documents the CLI for the free-audit landing on `migration.trobz.com`.
 
 ## Key Files
 
