@@ -2,7 +2,7 @@
 name = "odoo-db"
 version = "1.7.0"
 description = "Odoo databases management CLI tool"
-authors = [{name = "duydoanh", email = "moncoeur2k1@gmail.com"}]
+authors = [{name = "Do Anh Duy", email = "doanhduyxavie@gmail.com"}]
 requires-python = ">=3.10"
 readme = "README.md"
 license = "AGPL-3.0"
