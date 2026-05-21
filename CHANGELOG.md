@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.9.0 (2026-05-21)
+
+### Features
+
+- **crons**: Add --running flag to list currently executing scheduled actions
+  ([`0a4c34a`](https://github.com/trobz/odoo-db/commit/0a4c34a058398a7b51ec1f7cd4bc08e0e05edb3e))
+
+
 ## v1.8.0 (2026-05-20)
 
 ### Features
