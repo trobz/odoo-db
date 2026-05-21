@@ -255,6 +255,51 @@ def get_crons(cur: psycopg.Cursor) -> list[dict]:
     ]
 
 
+def get_running_crons(cur: psycopg.Cursor) -> list[dict]:
+    """List crons currently held by an Odoo worker (RowShareLock on ir_cron).
+
+    Odoo cron acquires the row with `SELECT ... FOR NO KEY UPDATE`, which
+    writes the locking txn id into the row's `xmax` system column. We join
+    pg_locks → pg_stat_activity → ir_cron via `xmax = backend_xid` to resolve
+    the exact cron being executed (the current `query` text has moved on to
+    the cron's workload by the time we look).
+    """
+    cur.execute("""
+        SELECT
+            a.pid,
+            ic.id AS cron_id,
+            ic.cron_name,
+            ias.model_name,
+            ias.code,
+            a.state,
+            a.query_start,
+            a.usename,
+            a.application_name,
+            a.query
+        FROM pg_locks l
+        JOIN pg_class c ON l.relation = c.oid
+        JOIN pg_stat_activity a ON a.pid = l.pid
+        LEFT JOIN ir_cron ic ON ic.xmax = a.backend_xid
+        LEFT JOIN ir_act_server ias ON ias.id = ic.ir_actions_server_id
+        WHERE c.relname = 'ir_cron' AND l.mode = 'RowShareLock'
+    """)
+    results: list[dict] = []
+    for pid, cron_id, name, model, code, state, query_start, usename, app_name, query in cur.fetchall():
+        results.append({
+            "pid": pid,
+            "cron_id": cron_id,
+            "name": name,
+            "model": model,
+            "code": (code or "").strip() or None,
+            "state": state,
+            "query_start": str(query_start) if query_start else None,
+            "user": usename,
+            "application": app_name,
+            "query": (query or "").strip(),
+        })
+    return results
+
+
 def get_jobs(cur: psycopg.Cursor) -> list[dict] | None:
     """Returns None if queue_job module not installed."""
     cur.execute(

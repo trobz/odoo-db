@@ -153,12 +153,44 @@ def modules(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 
 
 @app.command()
-def crons(db_name: Annotated[str, typer.Argument(metavar="DB")]):
+def crons(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    running: Annotated[
+        bool, typer.Option("--running", help="List crons currently running (RowShareLock on ir_cron).")
+    ] = False,
+):
     """List active scheduled actions for a database."""
     with _handle_errors(db_name), db.cursor(db_name) as cur:
-        rows_data = db.get_crons(cur)
+        rows_data = db.get_running_crons(cur) if running else db.get_crons(cur)
 
     with _writer() as w:
+        if running:
+            if w.fmt == "json":
+                w.json(rows_data)
+            elif w.fmt == "prometheus":
+                lines = [
+                    "# HELP odoo_db_crons_running Currently running cron count",
+                    "# TYPE odoo_db_crons_running gauge",
+                    f'odoo_db_crons_running{{db="{db_name}"}} {len(rows_data)}',
+                ]
+                w.prometheus(lines)
+            else:
+                w.table(
+                    ["pid", "cron_id", "name", "model", "code", "query_start"],
+                    [
+                        [
+                            str(r["pid"]),
+                            str(r["cron_id"]) if r["cron_id"] is not None else "",
+                            r["name"] or "",
+                            r["model"] or "",
+                            r["code"] or "",
+                            r["query_start"] or "",
+                        ]
+                        for r in rows_data
+                    ],
+                )
+            return
+
         if w.fmt == "json":
             w.json(rows_data)
         elif w.fmt == "prometheus":

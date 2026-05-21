@@ -47,7 +47,7 @@ odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log
 |---------|-------------|
 | `list` | All local Odoo DBs: name, version, neutralized status. `--verbose`: + module count, user count |
 | `modules <db>` | Installed modules with version |
-| `crons <db>` | Active scheduled actions |
+| `crons <db>` | Active scheduled actions. `--running`: show crons currently held by an Odoo worker (RowShareLock on `ir_cron`); transient debug data, excluded from `prepare-audit` |
 | `jobs <db>` | Queue job counts by state (returns message if queue_job not installed) |
 | `users <db>` | Active users with connection status (via bus_presence if available) |
 | `locks <db>` | Active DB locks (blocked/blocking PIDs + queries) |
