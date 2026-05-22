@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.9.2 (2026-05-22)
+
+### Bug Fixes
+
+- **logging**: Log to console only by default, no file unless --log-file given
+  ([`a1b42ff`](https://github.com/trobz/odoo-db/commit/a1b42ff8c28f2bfc10c10465e3c5effc50a2781c))
+
+
 ## v1.9.1 (2026-05-22)
 
 ### Bug Fixes
