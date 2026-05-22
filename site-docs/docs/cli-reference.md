@@ -23,7 +23,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `--output-file TEXT`: \[default: -\]
 * `--output-format TEXT`: \[default: text\]
 * `--log-level TEXT`: \[default: WARNING\]
-* `--log-file TEXT`: \[default: logs/odoo-db.log\]
+* `--log-file TEXT`
 * `--install-completion`: Install completion for the current shell.
 * `--show-completion`: Show completion for the current shell, to copy it or customize the installation.
 * `--help`: Show this message and exit.

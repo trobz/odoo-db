@@ -45,7 +45,7 @@ def main(
     output_file: Annotated[str, typer.Option("--output-file")] = "-",
     output_format: Annotated[str, typer.Option("--output-format")] = "text",
     log_level: Annotated[str, typer.Option("--log-level")] = "WARNING",
-    log_file: Annotated[str, typer.Option("--log-file")] = "logs/odoo-db.log",
+    log_file: Annotated[str | None, typer.Option("--log-file")] = None,
 ):
     global _output_file, _output_format
     _output_file = None if output_file == "-" else output_file
@@ -59,11 +59,12 @@ def main(
     console.setFormatter(fmt)
     root.addHandler(console)
 
-    log_path = Path(log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = logging.FileHandler(log_path)
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
+    if log_file is not None:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_path)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
 
 
 def _writer() -> output.Writer:
