@@ -8,6 +8,7 @@
 1. Update `README.md` and `AGENTS.md` to reflect changes (new flags, commands, behavior).
 2. Run `make check` (lint + format + type-check) before committing.
 3. Run pre-commit: `uv run pre-commit run -a` or via `make check`.
+4. If you touched the CLI surface (new command/flag/option), run `make cli-docs` and commit the regenerated `site-docs/docs/cli-reference.md`. The Documentation CI workflow also regenerates it on every push to `main`, but committing keeps PR diffs honest.
 
 Never skip these steps. They catch regressions and keep docs in sync.
 

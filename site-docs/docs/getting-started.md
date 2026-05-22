@@ -40,6 +40,7 @@ Add `--verbose` to also see module and user counts per database.
 odoo-db modules <db>      # installed modules with version
 odoo-db users <db>        # active users + last connection
 odoo-db crons <db>        # active scheduled actions
+odoo-db crons <db> --running  # crons currently executing (transient debug)
 odoo-db jobs <db>         # queue_job counts by state
 odoo-db locks <db>        # active PostgreSQL locks
 odoo-db stats <db>        # per-table record counts and sizes
