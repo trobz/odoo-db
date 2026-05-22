@@ -49,14 +49,14 @@ the Typer app, exhaustive, always current. Read that file (or run
 Non-obvious behavior worth keeping in agent context (the bits a `--help`
 dump won't tell you):
 
-- `prepare-audit` writes `<db>.json` to the current working directory and
-  bundles summary + modules + `model_owners` + `orphan_tables` +
-  `users_by_year` + stats + not-odoo. `model_owners` is derived from
-  `ir_model_data` + `ir_model_relation` (authoritative, not heuristic).
-  `orphan_tables` carries a `reason`: `uninstalled_module` (owner
-  uninstalled) or `no_ownership_data` (legacy / raw-SQL / custom).
-  `users_by_year` is an aggregate `{year: count}` — zero PII so the file
-  can ship without an NDA.
+- `prepare-audit` writes `<db>.json` to the current working directory.
+  `model_owners` is derived from `ir_model_data` + `ir_model_relation`
+  (authoritative, not heuristic). `orphan_tables` carries a `reason`:
+  `uninstalled_module` or `no_ownership_data`. `users_by_year` is
+  `{year: count}` — zero PII so the file can ship without an NDA.
+  `studio_customizations` carries custom models (with `mixins` list),
+  extended models (with full `fields` detail), and studio-flagged records
+  by type (menu records include `full_path`).
 - Every table in `stats.tables` and `orphan_tables` gets a
   `functional_group` = first underscore component of the table name
   (`purchase_order_line` → `purchase`). Display-only bucket, **not** an
@@ -66,7 +66,7 @@ dump won't tell you):
   partitions.
 - `not-odoo` tags each trigger/function as `recognized` (known infra like
   `unaccent`, `queue_job_notify`) or `custom`. The allowlist lives in
-  `odoo_db/db.py` under `recognized.functions` / `recognized.triggers`.
+  `odoo_db/db.py` under `_RECOGNIZED_FUNCTIONS` / `_RECOGNIZED_TRIGGERS`.
 - `crons --running` is transient debug data, intentionally excluded from
   `prepare-audit`.
 

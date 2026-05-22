@@ -589,6 +589,376 @@ def get_orphan_tables(
     return orphans
 
 
+def _as_str(val: object) -> str:
+    """Coerce a value to str, handling Odoo 16+ JSONB translated fields.
+
+    Odoo 16+ stores translatable Char/Text fields as JSONB inline in the row
+    (e.g. ``{"en_US": "Sale Order"}``). psycopg3 deserialises these as dicts.
+    We take the first value; fall back to empty string when the dict is empty.
+    """
+    if isinstance(val, dict):
+        return str(next(iter(val.values()), ""))
+    return str(val) if val is not None else ""
+
+
+def _build_menu_path(
+    menu_id: int,
+    all_menus: dict[int, tuple[object, int | None]],
+    depth: int = 0,
+) -> str:
+    if depth > 12 or menu_id not in all_menus:
+        return "?"
+    name, parent_id = all_menus[menu_id]
+    label = _as_str(name)
+    if parent_id:
+        return _build_menu_path(parent_id, all_menus, depth + 1) + " > " + label
+    return label
+
+
+def _studio_records_detail(
+    cur: psycopg.Cursor,
+) -> dict[str, list[dict]]:
+    """Return per-record detail for every ir_model_data row where studio=true.
+
+    Result: ``{odoo_model: [record_dict, ...]}`` ordered by model then record.
+    Each record dict always contains ``xmlid``. Extra keys depend on model type;
+    unknown model types fall back to ``{"xmlid": ..., "res_id": ...}``.
+    """
+    cur.execute("""
+        SELECT model, res_id, module || '.' || name AS xmlid
+        FROM ir_model_data
+        WHERE studio = true
+        ORDER BY model, id
+    """)
+    by_model: dict[str, list[tuple[int, str]]] = {}
+    for model, res_id, xmlid in cur.fetchall():
+        by_model.setdefault(model, []).append((res_id, xmlid))
+
+    result: dict[str, list[dict]] = {}
+
+    for odoo_model, rows in by_model.items():
+        ids = [r[0] for r in rows]
+        xmlids = {r[0]: r[1] for r in rows}
+
+        if odoo_model == "ir.model.fields":
+            cur.execute(
+                """
+                SELECT f.id, f.name, f.ttype, f.field_description, m.model
+                FROM ir_model_fields f
+                JOIN ir_model m ON f.model_id = m.id
+                WHERE f.id = ANY(%s)
+                ORDER BY m.model, f.name
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [
+                {
+                    "xmlid": xmlids[r[0]],
+                    "field": r[1],
+                    "ttype": r[2],
+                    "label": _as_str(r[3]),
+                    "on_model": r[4],
+                }
+                for r in cur.fetchall()
+            ]
+
+        elif odoo_model == "ir.ui.view":
+            cur.execute(
+                """
+                SELECT v.id, v.name, v.model, v.type, v.mode
+                FROM ir_ui_view v
+                WHERE v.id = ANY(%s)
+                ORDER BY v.model, v.name
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [
+                {
+                    "xmlid": xmlids[r[0]],
+                    "name": r[1],
+                    "model": r[2],
+                    "view_type": r[3],
+                    "mode": r[4],
+                }
+                for r in cur.fetchall()
+            ]
+
+        elif odoo_model == "ir.actions.act_window":
+            cur.execute(
+                """
+                SELECT a.id, a.name, a.res_model, bm.model AS binding_model
+                FROM ir_act_window a
+                LEFT JOIN ir_model bm ON a.binding_model_id = bm.id
+                WHERE a.id = ANY(%s)
+                ORDER BY a.res_model, a.name
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [
+                {
+                    "xmlid": xmlids[r[0]],
+                    "name": _as_str(r[1]),
+                    "model": r[2],
+                    "binding": r[3],
+                }
+                for r in cur.fetchall()
+            ]
+
+        elif odoo_model == "ir.actions.server":
+            cur.execute(
+                """
+                SELECT ias.id, ias.name, bm.model AS bound_to, ias.state
+                FROM ir_act_server ias
+                LEFT JOIN ir_model bm ON ias.binding_model_id = bm.id
+                WHERE ias.id = ANY(%s)
+                ORDER BY bm.model, ias.name
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [
+                {
+                    "xmlid": xmlids[r[0]],
+                    "name": _as_str(r[1]),
+                    "bound_to": r[2],
+                    "action_type": r[3],
+                }
+                for r in cur.fetchall()
+            ]
+
+        elif odoo_model == "ir.model":
+            cur.execute(
+                """
+                SELECT m.id, m.model, m.name
+                FROM ir_model m
+                WHERE m.id = ANY(%s)
+                ORDER BY m.model
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [{"xmlid": xmlids[r[0]], "model": r[1], "name": _as_str(r[2])} for r in cur.fetchall()]
+
+        elif odoo_model == "ir.ui.menu":
+            # Fetch entire menu tree to build full paths in Python.
+            cur.execute("SELECT id, name, parent_id FROM ir_ui_menu")
+            all_menus: dict[int, tuple[object, int | None]] = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+            cur.execute(
+                "SELECT id, name FROM ir_ui_menu WHERE id = ANY(%s) ORDER BY id",
+                (ids,),
+            )
+            result[odoo_model] = [
+                {
+                    "xmlid": xmlids[r[0]],
+                    "name": _as_str(r[1]),
+                    "full_path": _build_menu_path(r[0], all_menus),
+                }
+                for r in cur.fetchall()
+            ]
+
+        elif odoo_model == "ir.model.access":
+            cur.execute(
+                """
+                SELECT acc.id, acc.name, m.model, g.name AS group_name,
+                    acc.perm_read, acc.perm_write, acc.perm_create, acc.perm_unlink
+                FROM ir_model_access acc
+                JOIN ir_model m ON acc.model_id = m.id
+                LEFT JOIN res_groups g ON acc.group_id = g.id
+                WHERE acc.id = ANY(%s)
+                ORDER BY m.model, acc.name
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [
+                {
+                    "xmlid": xmlids[r[0]],
+                    "name": r[1],
+                    "model": r[2],
+                    "group": _as_str(r[3]) if r[3] is not None else None,
+                    "perms": (
+                        ("r" if r[4] else "") + ("w" if r[5] else "") + ("c" if r[6] else "") + ("d" if r[7] else "")
+                    ),
+                }
+                for r in cur.fetchall()
+            ]
+
+        elif odoo_model == "ir.model.inherit":
+            cur.execute("SELECT 1 FROM pg_tables WHERE tablename = 'ir_model_inherit'")
+            if cur.fetchone():
+                cur.execute(
+                    """
+                    SELECT inh.id, child.model AS child_model, parent.model AS inherits_from
+                    FROM ir_model_inherit inh
+                    JOIN ir_model child ON inh.model_id = child.id
+                    JOIN ir_model parent ON inh.parent_id = parent.id
+                    WHERE inh.id = ANY(%s)
+                    ORDER BY child.model
+                    """,
+                    (ids,),
+                )
+                result[odoo_model] = [
+                    {
+                        "xmlid": xmlids[r[0]],
+                        "child_model": r[1],
+                        "inherits_from": r[2],
+                    }
+                    for r in cur.fetchall()
+                ]
+            else:
+                result[odoo_model] = [{"xmlid": xmlids[i], "res_id": i} for i in ids]
+
+        elif odoo_model == "ir.default":
+            cur.execute(
+                """
+                SELECT d.id, m.model, f.name AS field_name, d.json_value
+                FROM ir_default d
+                JOIN ir_model_fields f ON d.field_id = f.id
+                JOIN ir_model m ON f.model_id = m.id
+                WHERE d.id = ANY(%s)
+                ORDER BY m.model, f.name
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [
+                {
+                    "xmlid": xmlids[r[0]],
+                    "model": r[1],
+                    "field": r[2],
+                    "value": r[3],
+                }
+                for r in cur.fetchall()
+            ]
+
+        elif odoo_model == "base.automation":
+            cur.execute(
+                """
+                SELECT ba.id, ba.name, m.model AS on_model, ba.trigger
+                FROM base_automation ba
+                JOIN ir_model m ON ba.model_id = m.id
+                WHERE ba.id = ANY(%s)
+                ORDER BY m.model, ba.name
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [
+                {
+                    "xmlid": xmlids[r[0]],
+                    "name": _as_str(r[1]),
+                    "model": r[2],
+                    "trigger": r[3],
+                }
+                for r in cur.fetchall()
+            ]
+
+        elif odoo_model == "ir.rule":
+            cur.execute(
+                """
+                SELECT r.id, r.name, m.model AS on_model
+                FROM ir_rule r
+                JOIN ir_model m ON r.model_id = m.id
+                WHERE r.id = ANY(%s)
+                ORDER BY m.model, r.name
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [{"xmlid": xmlids[r[0]], "name": _as_str(r[1]), "model": r[2]} for r in cur.fetchall()]
+
+        elif odoo_model == "ir.module.module":
+            cur.execute(
+                """
+                SELECT mod.id, mod.name, mod.state
+                FROM ir_module_module mod
+                WHERE mod.id = ANY(%s)
+                ORDER BY mod.name
+                """,
+                (ids,),
+            )
+            result[odoo_model] = [{"xmlid": xmlids[r[0]], "module": r[1], "state": r[2]} for r in cur.fetchall()]
+
+        else:
+            result[odoo_model] = [{"xmlid": xmlids[i], "res_id": i} for i in ids]
+
+    return result
+
+
+def get_studio_customizations(cur: psycopg.Cursor) -> dict:
+    """Return Studio customization stats via raw SQL.
+
+    Four sub-queries:
+    1. custom_models — ir_model WHERE state='manual', enriched with mixin list
+    2. studio_records_by_type — detailed records from ir_model_data WHERE studio=true,
+       grouped by Odoo model with per-record detail (only when web_studio installed)
+    3. extended_models — custom fields (with full detail) added to existing models
+    4. mixins — which abstract models each custom model inherits from (mail.thread, etc.)
+    """
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'ir_model_data' AND column_name = 'studio'
+    """)
+    has_studio_col = bool(cur.fetchone())
+
+    # Custom models
+    cur.execute("""
+        SELECT m.model, m.name,
+            count(f.id) FILTER (WHERE f.state = 'manual') AS custom_fields
+        FROM ir_model m
+        LEFT JOIN ir_model_fields f ON f.model_id = m.id
+        WHERE m.state = 'manual'
+        GROUP BY m.model, m.name
+        ORDER BY m.model
+    """)
+    custom_models = [{"model": r[0], "name": _as_str(r[1]), "custom_fields": r[2]} for r in cur.fetchall()]
+
+    # Mixins per custom model (mail.thread, mail.activity.mixin, etc.)
+    cur.execute("""
+        SELECT DISTINCT child.model, parent.model AS mixin
+        FROM ir_model_inherit inh
+        JOIN ir_model child ON inh.model_id = child.id
+        JOIN ir_model parent ON inh.parent_id = parent.id
+        WHERE child.state = 'manual'
+        ORDER BY child.model, parent.model
+    """)
+    mixins_by_model: dict[str, list[str]] = {}
+    for child_model, mixin in cur.fetchall():
+        mixins_by_model.setdefault(child_model, []).append(mixin)
+    for m in custom_models:
+        m["mixins"] = mixins_by_model.get(m["model"], [])
+
+    records_by_type: dict[str, list[dict]] = {}
+    if has_studio_col:
+        records_by_type = _studio_records_detail(cur)
+
+    # Extended models — full field detail grouped by model
+    cur.execute("""
+        SELECT m.model, f.name, f.ttype, f.field_description,
+            f.relation, f.required, f.readonly, f.store
+        FROM ir_model_fields f
+        JOIN ir_model m ON f.model_id = m.id
+        WHERE f.state = 'manual' AND m.state != 'manual'
+        ORDER BY m.model, f.name
+    """)
+    extended_by_model: dict[str, list[dict]] = {}
+    for r in cur.fetchall():
+        extended_by_model.setdefault(r[0], []).append({
+            "name": r[1],
+            "ttype": r[2],
+            "label": _as_str(r[3]),
+            "relation": r[4] or "",
+            "required": bool(r[5]),
+            "readonly": bool(r[6]),
+            "store": bool(r[7]),
+        })
+    extended_models = [
+        {"model": m, "added_fields": len(fields), "fields": fields} for m, fields in extended_by_model.items()
+    ]
+
+    return {
+        "custom_model_count": len(custom_models),
+        "custom_models": custom_models,
+        "studio_records_by_type": records_by_type,
+        "extended_model_count": len(extended_models),
+        "extended_models": extended_models,
+    }
+
+
 def get_locks(cur: psycopg.Cursor, dbname: str) -> dict:
     cur.execute(
         """

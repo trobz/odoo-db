@@ -41,6 +41,9 @@ ignore = [
 ]
 extend-safe-fixes = ["UP008"]
 
+[lint.mccabe]
+max-complexity = 20
+
 [lint.per-file-ignores]
 "tests/*" = ["S101"]
 
