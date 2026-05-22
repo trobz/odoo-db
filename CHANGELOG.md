@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.9.1 (2026-05-22)
+
+### Bug Fixes
+
+- **docs**: Repair broken main.html override + auto-generate CLI reference
+  ([`fe4d700`](https://github.com/trobz/odoo-db/commit/fe4d700659e1a4977c51398c4887adf2879dd946))
+
+### Documentation
+
+- **agents**: Trim CLAUDE.md/AGENTS.md commands table → point at auto-gen reference
+  ([`fd2e938`](https://github.com/trobz/odoo-db/commit/fd2e93826597c5a07c317e269e37c0bfebf79933))
+
+
 ## v1.9.0 (2026-05-21)
 
 ### Features
