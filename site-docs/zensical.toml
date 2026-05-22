@@ -9,6 +9,7 @@ copyright = "Copyright &copy; 2026 Trobz"
 nav = [
   {Home = "index.md"},
   {"Getting Started" = "getting-started.md"},
+  {"CLI Reference" = "cli-reference.md"},
 ]
 extra_css = [
   "stylesheets/hero.css",

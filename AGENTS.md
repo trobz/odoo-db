@@ -8,6 +8,7 @@
 1. Update `README.md` and `AGENTS.md` to reflect changes (new flags, commands, behavior).
 2. Run `make check` (lint + format + type-check) before committing.
 3. Run pre-commit: `uv run pre-commit run -a` or via `make check`.
+4. If you touched the CLI surface (new command/flag/option), run `make cli-docs` and commit the regenerated `site-docs/docs/cli-reference.md`. The Documentation CI workflow also regenerates it on every push to `main`, but committing keeps PR diffs honest.
 
 Never skip these steps. They catch regressions and keep docs in sync.
 
@@ -41,19 +42,33 @@ odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log
 - `--log-level` — `DEBUG`, `INFO`, `WARNING` (default), `ERROR`
 - `--log-file` — default `logs/odoo-db.log` (auto-created, gitignored)
 
-**Commands:**
+**Commands:** see `site-docs/docs/cli-reference.md` — auto-generated from
+the Typer app, exhaustive, always current. Read that file (or run
+`odoo-db <cmd> --help`) instead of relying on a hand-maintained list here.
 
-| Command | Description |
-|---------|-------------|
-| `list` | All local Odoo DBs: name, version, neutralized status. `--verbose`: + module count, user count |
-| `modules <db>` | Installed modules with version |
-| `crons <db>` | Active scheduled actions. `--running`: show crons currently held by an Odoo worker (RowShareLock on `ir_cron`); transient debug data, excluded from `prepare-audit` |
-| `jobs <db>` | Queue job counts by state (returns message if queue_job not installed) |
-| `users <db>` | Active users with connection status (via bus_presence if available) |
-| `locks <db>` | Active DB locks (blocked/blocking PIDs + queries) |
-| `stats <db>` | Per-table record counts and sizes by year; `--years N` (default 3), `--top N` (default 20). Tables with 0-byte heap report `total_records=0` and empty `year_counts` without running `count(*)` |
-| `not-odoo <db>` | Show non-Odoo objects: custom views (not in ir_model), triggers, functions, and stored procedures. Each trigger/function is tagged `recognized` (known infra like `unaccent`, `queue_job_notify`) or `custom`; the JSON payload exposes the allowlist under `recognized.functions` / `recognized.triggers` |
-| `prepare-audit <db>` | Bundle summary + modules + `model_owners` + `orphan_tables` + `users_by_year` + stats + not-odoo into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` skill; `--years N` (default 3), `--top N` (default 0 = all tables); always JSON; override path with `--output-file`. `model_owners` comes from `ir_model_data` + `ir_model_relation` (authoritative, not a heuristic). `orphan_tables` flags tables not owned by any installed module, with `reason: uninstalled_module` (owner uninstalled) or `reason: no_ownership_data` (no `ir_model_data` row — legacy/raw-SQL/custom). Every table in `stats.tables` and `orphan_tables` carries a `functional_group` = first underscore component (e.g. `purchase_order_line` → `purchase`) — display-only bucket for grouping related tables across modules, not an owner attribution. `users_by_year` is an aggregate `{year: count}` of active users by `create_date` year — zero PII, so the audit file is safe to share without an NDA |
+Non-obvious behavior worth keeping in agent context (the bits a `--help`
+dump won't tell you):
+
+- `prepare-audit` writes `<db>.json` to the current working directory and
+  bundles summary + modules + `model_owners` + `orphan_tables` +
+  `users_by_year` + stats + not-odoo. `model_owners` is derived from
+  `ir_model_data` + `ir_model_relation` (authoritative, not heuristic).
+  `orphan_tables` carries a `reason`: `uninstalled_module` (owner
+  uninstalled) or `no_ownership_data` (legacy / raw-SQL / custom).
+  `users_by_year` is an aggregate `{year: count}` — zero PII so the file
+  can ship without an NDA.
+- Every table in `stats.tables` and `orphan_tables` gets a
+  `functional_group` = first underscore component of the table name
+  (`purchase_order_line` → `purchase`). Display-only bucket, **not** an
+  owner attribution — owner lookup goes through `model_owners`.
+- `stats` skips `count(*)` on tables whose heap is 0 bytes
+  (`total_records=0`, empty `year_counts`) to avoid scanning empty
+  partitions.
+- `not-odoo` tags each trigger/function as `recognized` (known infra like
+  `unaccent`, `queue_job_notify`) or `custom`. The allowlist lives in
+  `odoo_db/db.py` under `recognized.functions` / `recognized.triggers`.
+- `crons --running` is transient debug data, intentionally excluded from
+  `prepare-audit`.
 
 **Key SQL for `list`:**
 ```sql

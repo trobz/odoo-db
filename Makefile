@@ -51,12 +51,17 @@ help:
 
 .DEFAULT_GOAL := help
 
+.PHONY: cli-docs
+cli-docs: ## Regenerate site-docs/docs/cli-reference.md from Typer --help
+	@echo "🚀 Regenerating CLI reference from --help"
+	@uv run python scripts/gen_cli_reference.py
+
 .PHONY: docs
-docs: ## Build the documentation site
+docs: cli-docs ## Build the documentation site (regenerates CLI reference first)
 	@echo "🚀 Building documentation site"
 	@uv run zensical build -f site-docs/zensical.toml
 
 .PHONY: docs-serve
-docs-serve: ## Serve the documentation site locally
+docs-serve: cli-docs ## Serve the documentation site locally
 	@echo "🚀 Serving documentation site"
 	@uv run zensical serve -f site-docs/zensical.toml

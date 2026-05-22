@@ -3,26 +3,36 @@ on:
   push:
     branches:
       - main
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
   pages: write
   id-token: write
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/configure-pages@v6
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: 3.x
-      - run: pip install zensical
-      - run: zensical build --clean -f site-docs/zensical.toml
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - run: uv sync --frozen
+      - run: uv run python scripts/gen_cli_reference.py
+      - run: uv run zensical build --clean -f site-docs/zensical.toml
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site-docs/site
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
       - uses: actions/deploy-pages@v5
         id: deployment
