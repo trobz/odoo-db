@@ -40,7 +40,7 @@ odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log
 - `--output-file` — default `-` (stdout)
 - `--output-format` — `text` (default), `json`, `prometheus`
 - `--log-level` — `DEBUG`, `INFO`, `WARNING` (default), `ERROR`
-- `--log-file` — default `logs/odoo-db.log` (auto-created, gitignored)
+- `--log-file` — optional; if omitted, logs go to console only
 
 **Commands:** see `site-docs/docs/cli-reference.md` — auto-generated from
 the Typer app, exhaustive, always current. Read that file (or run
@@ -92,7 +92,7 @@ psycopg.connect(dbname=db_name)  # no host/user needed for local socket
 ## Logging
 
 - Console handler always active.
-- File handler writes to `--log-file` (default `logs/odoo-db.log`), parent dir auto-created.
+- File handler only added when `--log-file PATH` is explicitly passed; parent dir auto-created.
 - `logs/*.log` is gitignored; `logs/.gitkeep` tracks the directory.
 
 ## Dev Commands
