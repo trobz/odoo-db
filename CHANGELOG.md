@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.10.0 (2026-05-25)
+
+### Features
+
+- **studio**: Add studio command and enrich prepare-audit bundle
+  ([`02c290e`](https://github.com/trobz/odoo-db/commit/02c290eaad5263a78098207eaadfca6be7d22f5f))
+
+
 ## v1.9.2 (2026-05-22)
 
 ### Bug Fixes
