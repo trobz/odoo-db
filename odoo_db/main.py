@@ -390,6 +390,55 @@ def stats(
 
 
 # ---------------------------------------------------------------------------
+# studio
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def studio(db_name: Annotated[str, typer.Argument(metavar="DB")]):
+    """Show Studio customizations: custom models, extended models, studio-flagged records."""
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        data = db.get_studio_customizations(cur)
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(data)
+        elif w.fmt == "prometheus":
+            lines = [
+                "# HELP odoo_db_studio_custom_models Studio custom model count",
+                "# TYPE odoo_db_studio_custom_models gauge",
+                f'odoo_db_studio_custom_models{{db="{db_name}"}} {data["custom_model_count"]}',
+                "# HELP odoo_db_studio_extended_models Models extended via Studio",
+                "# TYPE odoo_db_studio_extended_models gauge",
+                f'odoo_db_studio_extended_models{{db="{db_name}"}} {data["extended_model_count"]}',
+            ]
+            w.prometheus(lines)
+        else:
+            w.text(f"Custom models (state=manual): {data['custom_model_count']}")
+            if data["custom_models"]:
+                w.table(
+                    ["model", "name", "custom_fields"],
+                    [[m["model"], m["name"], str(m["custom_fields"])] for m in data["custom_models"]],
+                )
+            w.text(f"\nModels extended via Studio: {data['extended_model_count']}")
+            if data["extended_models"]:
+                w.table(
+                    ["model", "added_fields"],
+                    [[m["model"], str(m["added_fields"])] for m in data["extended_models"]],
+                )
+            rbt = data["studio_records_by_type"]
+            if rbt:
+                total = sum(len(v) for v in rbt.values())
+                w.text(f"\nStudio-flagged records (ir_model_data.studio=true): {total}")
+                w.table(
+                    ["type", "count"],
+                    [[k, str(len(v))] for k, v in sorted(rbt.items(), key=lambda x: len(x[1]), reverse=True)],
+                )
+            elif not rbt and not data["custom_models"]:
+                w.text("No Studio customizations detected.")
+
+
+# ---------------------------------------------------------------------------
 # not-odoo
 # ---------------------------------------------------------------------------
 
@@ -546,6 +595,7 @@ def cmd_prepare_audit(
             stats_data = db.get_stats(cur, years=years, top=top, model_owners=model_owners)
             not_odoo_data = db.get_not_odoo(cur)
             users_by_year = db.get_users_by_year(cur)
+            studio_data = db.get_studio_customizations(cur)
         orphan_tables = db.get_orphan_tables(stats_data["tables"], model_owners, modules_data)
 
     payload = {
@@ -561,6 +611,7 @@ def cmd_prepare_audit(
         "users_by_year": users_by_year,
         "stats": _compact_stats(stats_data),
         "not_odoo": not_odoo_data,
+        "studio_customizations": studio_data,
     }
 
     target = _output_file if _output_file is not None else f"{db_name}.json"
@@ -575,7 +626,9 @@ def cmd_prepare_audit(
         f"tables={len(stats_data['tables'])}, orphans={len(orphan_tables)}, "
         f"user_years={len(users_by_year)}, "
         f"views={len(not_odoo_data['views'])}, triggers={len(not_odoo_data['triggers'])}, "
-        f"functions={len(not_odoo_data['functions'])}, procedures={len(not_odoo_data['procedures'])})"
+        f"functions={len(not_odoo_data['functions'])}, procedures={len(not_odoo_data['procedures'])}, "
+        f"studio_models={studio_data['custom_model_count']}, "
+        f"studio_extended={studio_data['extended_model_count']})"
     )
 
 

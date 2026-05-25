@@ -37,6 +37,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `users`: List active users for a database.
 * `locks`: Show active database locks for a database.
 * `stats`: Show per-table record counts and sizes for...
+* `studio`: Show Studio customizations: custom models,...
 * `not-odoo`: Show non-Odoo database objects: custom...
 * `prepare-audit`: Combine summary + modules + stats +...
 
@@ -164,6 +165,24 @@ $ odoo-db stats [OPTIONS] DB
 
 * `-y, --years INTEGER`: Number of years to show  \[default: 3\]
 * `-n, --top INTEGER`: Number of top tables to show  \[default: 20\]
+* `--help`: Show this message and exit.
+
+## `odoo-db studio`
+
+Show Studio customizations: custom models, extended models, studio-flagged records.
+
+**Usage**:
+
+```console
+$ odoo-db studio [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
 * `--help`: Show this message and exit.
 
 ## `odoo-db not-odoo`
