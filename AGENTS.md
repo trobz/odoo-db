@@ -57,6 +57,18 @@ dump won't tell you):
   `studio_customizations` carries custom models (with `mixins` list),
   extended models (with full `fields` detail), and studio-flagged records
   by type (menu records include `full_path`).
+  `--admin-user LOGIN` (repeatable) excludes a specific login from the
+  `customized_records` scan — useful when the primary admin uses a personal
+  account instead of the system `admin` user.
+  Additional bundle fields: `orphan_fields` (list of `{table, column, reason}`),
+  `customized_records` (list of `{module, name, login}`),
+  `customized_records_excluded` (list of excluded logins, empty if none),
+  `mail_message_stats` (`{message_type: count}` or null if table missing),
+  `attachment_stats` (`{storage: {count, total_size}}` or null),
+  `cron_inventory` (list of `{name, active, code_based}` or null),
+  `company_count` (int).
+  Module entries in `modules` include `dependent_count` (number of installed
+  modules that depend on it) added at `prepare-audit` time.
 - Every table in `stats.tables` and `orphan_tables` gets a
   `functional_group` = first underscore component of the table name
   (`purchase_order_line` → `purchase`). Display-only bucket, **not** an

@@ -229,4 +229,5 @@ $ odoo-db prepare-audit [OPTIONS] DB
 
 * `-y, --years INTEGER`: Years for stats breakdown  \[default: 3\]
 * `-n, --top INTEGER`: Top tables by size to include (0 = all)  \[default: 0\]
+* `--admin-user TEXT`: Login to exclude from customized-records scan (repeat for multiple). Use when the project admin uses a personal account instead of &#x27;admin&#x27;.
 * `--help`: Show this message and exit.
