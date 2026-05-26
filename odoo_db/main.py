@@ -573,6 +573,14 @@ def cmd_prepare_audit(
     db_name: Annotated[str, typer.Argument(metavar="DB")],
     years: Annotated[int, typer.Option("--years", "-y", help="Years for stats breakdown")] = 3,
     top: Annotated[int, typer.Option("--top", "-n", help="Top tables by size to include (0 = all)")] = 0,
+    admin_users: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--admin-user",
+            help="Login to exclude from customized-records scan (repeat for multiple). "
+            "Use when the project admin uses a personal account instead of 'admin'.",
+        ),
+    ] = None,
 ):
     """Combine summary + modules + stats + not-odoo into a $db.json audit export.
 
@@ -589,13 +597,23 @@ def cmd_prepare_audit(
         if summary is None:
             typer.echo(f"Error [{db_name}]: not an Odoo database", err=True)
             raise typer.Exit(1)
+        exclude_logins = list(admin_users) if admin_users else []
         with db.cursor(db_name) as cur:
             modules_data = db.get_modules(cur)
+            module_dependents = db.get_module_dependents(cur)
             model_owners = db.get_model_owners(cur)
             stats_data = db.get_stats(cur, years=years, top=top, model_owners=model_owners)
             not_odoo_data = db.get_not_odoo(cur)
             users_by_year = db.get_users_by_year(cur)
             studio_data = db.get_studio_customizations(cur)
+            orphan_fields = db.get_orphan_fields(cur)
+            customized_records = db.get_customized_system_records(cur, exclude_logins=exclude_logins)
+            mail_message_stats = db.get_mail_message_stats(cur)
+            attachment_stats = db.get_attachment_stats(cur)
+            cron_inventory = db.get_cron_inventory(cur)
+            company_count = db.get_company_count(cur)
+        for m in modules_data:
+            m["dependent_count"] = module_dependents.get(m["name"], 0)
         orphan_tables = db.get_orphan_tables(stats_data["tables"], model_owners, modules_data)
 
     payload = {
@@ -612,6 +630,13 @@ def cmd_prepare_audit(
         "stats": _compact_stats(stats_data),
         "not_odoo": not_odoo_data,
         "studio_customizations": studio_data,
+        "orphan_fields": orphan_fields,
+        "customized_records": customized_records,
+        "customized_records_excluded": exclude_logins if exclude_logins else [],
+        "mail_message_stats": mail_message_stats,
+        "attachment_stats": attachment_stats,
+        "cron_inventory": cron_inventory,
+        "company_count": company_count,
     }
 
     target = _output_file if _output_file is not None else f"{db_name}.json"
@@ -628,7 +653,11 @@ def cmd_prepare_audit(
         f"views={len(not_odoo_data['views'])}, triggers={len(not_odoo_data['triggers'])}, "
         f"functions={len(not_odoo_data['functions'])}, procedures={len(not_odoo_data['procedures'])}, "
         f"studio_models={studio_data['custom_model_count']}, "
-        f"studio_extended={studio_data['extended_model_count']})"
+        f"studio_extended={studio_data['extended_model_count']}, "
+        f"orphan_fields={len(orphan_fields)}, "
+        f"customized_records={len(customized_records)}, "
+        f"companies={company_count}, "
+        f"crons={len(cron_inventory) if cron_inventory is not None else 'N/A'})"
     )
 
 

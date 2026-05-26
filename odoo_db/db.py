@@ -177,12 +177,29 @@ def get_db_summary(dbname: str, verbose: bool = False) -> DbSummary | None:
 
 def get_modules(cur: psycopg.Cursor) -> list[dict]:
     cur.execute("""
-            SELECT name, latest_version
-            FROM ir_module_module
-            WHERE state = 'installed'
-            ORDER BY name
-        """)
-    return [{"name": row[0], "version": row[1] or ""} for row in cur.fetchall()]
+        SELECT name, latest_version, auto_install
+        FROM ir_module_module
+        WHERE state = 'installed'
+        ORDER BY name
+    """)
+    return [{"name": row[0], "version": row[1] or "", "auto_install": bool(row[2])} for row in cur.fetchall()]
+
+
+def get_module_dependents(cur: psycopg.Cursor) -> dict[str, int]:
+    """Return {module_name: count_of_installed_modules_that_depend_on_it}.
+
+    Uses ir_module_module_dependency where `name` is the dependency string
+    and module_id FK points to the module that declares the dependency.
+    Only counts installed modules on both sides.
+    """
+    cur.execute("""
+        SELECT d.name, count(*) AS cnt
+        FROM ir_module_module_dependency d
+        JOIN ir_module_module m ON m.id = d.module_id
+        WHERE m.state = 'installed'
+        GROUP BY d.name
+    """)
+    return {r[0]: r[1] for r in cur.fetchall()}
 
 
 def get_model_owners(cur: psycopg.Cursor) -> dict[str, str]:
@@ -927,9 +944,17 @@ def get_studio_customizations(cur: psycopg.Cursor) -> dict:
         records_by_type = _studio_records_detail(cur)
 
     # Extended models — full field detail grouped by model
+    # has_studio_tracking: field is recorded in ir_model_data with studio=True
+    # Fields without tracking were added outside Studio UI (RPC, XML, import…)
     cur.execute("""
         SELECT m.model, f.name, f.ttype, f.field_description,
-            f.relation, f.required, f.readonly, f.store
+            f.relation, f.required, f.readonly, f.store,
+            EXISTS (
+                SELECT 1 FROM ir_model_data imd
+                WHERE imd.model = 'ir.model.fields'
+                  AND imd.res_id = f.id
+                  AND imd.studio = true
+            ) AS has_studio_tracking
         FROM ir_model_fields f
         JOIN ir_model m ON f.model_id = m.id
         WHERE f.state = 'manual' AND m.state != 'manual'
@@ -945,6 +970,7 @@ def get_studio_customizations(cur: psycopg.Cursor) -> dict:
             "required": bool(r[5]),
             "readonly": bool(r[6]),
             "store": bool(r[7]),
+            "has_studio_tracking": bool(r[8]),
         })
     extended_models = [
         {"model": m, "added_fields": len(fields), "fields": fields} for m, fields in extended_by_model.items()
@@ -957,6 +983,170 @@ def get_studio_customizations(cur: psycopg.Cursor) -> dict:
         "extended_model_count": len(extended_models),
         "extended_models": extended_models,
     }
+
+
+def get_orphan_fields(cur: psycopg.Cursor) -> list[dict]:
+    """Return DB columns that exist in Odoo model tables but have no ir_model_fields entry.
+
+    These are ghost columns — left behind by uninstalled modules or direct SQL DDL.
+    Only checks tables whose name matches an ir_model entry (replace('.','_')).
+    Excludes ORM meta-columns always present in every table.
+    """
+    cur.execute("""
+        WITH model_cols AS (
+            SELECT replace(m.model, '.', '_') AS tbl, f.name AS col
+            FROM ir_model_fields f
+            JOIN ir_model m ON m.id = f.model_id
+            WHERE f.ttype NOT IN ('one2many', 'many2many')
+        ),
+        odoo_tables AS (
+            SELECT replace(model, '.', '_') AS tbl FROM ir_model
+        )
+        SELECT c.table_name, c.column_name, c.data_type
+        FROM information_schema.columns c
+        JOIN odoo_tables ot ON ot.tbl = c.table_name
+        LEFT JOIN model_cols mc ON mc.tbl = c.table_name AND mc.col = c.column_name
+        WHERE c.table_schema = 'public'
+          AND mc.col IS NULL
+          AND c.column_name NOT IN (
+              'id', 'create_uid', 'create_date', 'write_uid', 'write_date'
+          )
+        ORDER BY c.table_name, c.column_name
+    """)
+    return [{"table": r[0], "column": r[1], "data_type": r[2]} for r in cur.fetchall()]
+
+
+def get_customized_system_records(cur: psycopg.Cursor, exclude_logins: list[str] | None = None) -> list[dict]:
+    """Return all records that have an XML ID from a module but were edited by a real user.
+
+    Checks write_uid on the actual record table (not on ir_model_data). A record
+    is considered customized when:
+      - it has an ir_model_data entry from a real module (not studio/export/import)
+      - its write_uid on the underlying table is not the system user (uid=1)
+
+    Covers ALL models in ir_model_data, not just a curated list. Runs one query
+    per model — skips tables that don't exist or lack write_uid (m2m relation
+    tables, etc.). Returns per-record detail: module, model, xml_id, modified_by.
+    """
+    # All distinct models referenced by real modules
+    cur.execute("""
+        SELECT DISTINCT model
+        FROM ir_model_data
+        WHERE module NOT IN ('__export__', '__import__', '__custom__', '__base__')
+          AND module NOT LIKE '%studio%'
+        ORDER BY model
+    """)
+    candidate_models = [r[0] for r in cur.fetchall()]
+    candidate_tables = [m.replace(".", "_") for m in candidate_models]
+
+    # Keep only tables that exist AND have write_uid
+    cur.execute(
+        """
+        SELECT c.table_name
+        FROM information_schema.columns c
+        WHERE c.table_schema = 'public'
+          AND c.column_name = 'write_uid'
+          AND c.table_name = ANY(%s)
+    """,
+        (candidate_tables,),
+    )
+    queryable = {r[0] for r in cur.fetchall()}
+
+    model_table_pairs = [(m, m.replace(".", "_")) for m in candidate_models if m.replace(".", "_") in queryable]
+
+    excluded = list(exclude_logins) if exclude_logins else []
+
+    results: list[dict] = []
+    for model, table in track(
+        model_table_pairs,
+        description="Scanning customized records…",
+        console=_progress_console,
+    ):
+        excl_clause = sql.SQL("AND u.login != ALL(%(excl)s)") if excluded else sql.SQL("")
+        params: dict = {"model": model}
+        if excluded:
+            params["excl"] = excluded
+        cur.execute(
+            sql.SQL("""
+            SELECT imd.module, imd.name, u.login
+            FROM ir_model_data imd
+            JOIN {tbl} t ON t.id = imd.res_id
+            LEFT JOIN res_users u ON u.id = t.write_uid
+            WHERE imd.model = %(model)s
+              AND imd.module NOT IN ('__export__', '__import__', '__custom__', '__base__')
+              AND imd.module NOT LIKE '%%studio%%'
+              AND t.write_uid IS NOT NULL
+              AND t.write_uid != 1
+              {excl}
+            ORDER BY imd.module, imd.name
+            """).format(tbl=sql.Identifier(table), excl=excl_clause),
+            params,
+        )
+        for r in cur.fetchall():
+            results.append({"model": model, "module": r[0], "xml_id": r[1], "modified_by": r[2]})
+    return results
+
+
+def get_mail_message_stats(cur: psycopg.Cursor) -> dict[str, int] | None:
+    """Breakdown of mail.message by message_type. Returns None if table absent."""
+    cur.execute("SELECT to_regclass('public.mail_message')")
+    row = _fetch_one(cur)
+    if not row[0]:
+        return None
+    cur.execute("""
+        SELECT message_type, count(*)::int
+        FROM mail_message
+        GROUP BY message_type
+        ORDER BY count(*) DESC
+    """)
+    return {r[0]: r[1] for r in cur.fetchall()}
+
+
+def get_attachment_stats(cur: psycopg.Cursor) -> dict | None:
+    """ir.attachment breakdown: db_binary vs filestore, counts, sizes."""
+    cur.execute("SELECT to_regclass('public.ir_attachment')")
+    row = _fetch_one(cur)
+    if not row[0]:
+        return None
+    cur.execute("""
+        SELECT
+            CASE WHEN store_fname IS NULL THEN 'db_binary' ELSE 'filestore' END AS storage,
+            count(*)::int AS cnt,
+            coalesce(sum(file_size), 0)::bigint AS total_size
+        FROM ir_attachment
+        GROUP BY 1
+    """)
+    return {r[0]: {"count": r[1], "total_size": r[2]} for r in cur.fetchall()}
+
+
+def get_cron_inventory(cur: psycopg.Cursor) -> list[dict] | None:
+    """List installed ir.cron entries with name, active, code_based flag."""
+    cur.execute("SELECT to_regclass('public.ir_cron')")
+    row = _fetch_one(cur)
+    if not row[0]:
+        return None
+    cur.execute("""
+        SELECT s.name AS name,
+               c.active,
+               coalesce(s.state = 'code', false) AS code_based,
+               EXISTS (
+                   SELECT 1 FROM ir_model_data imd
+                   WHERE imd.model = 'ir.cron' AND imd.res_id = c.id
+               ) AS has_xmlid
+        FROM ir_cron c
+        LEFT JOIN ir_act_server s ON s.id = c.ir_actions_server_id
+        ORDER BY c.active DESC, s.name
+    """)
+    return [
+        {"name": _as_str(r[0]), "active": bool(r[1]), "code_based": bool(r[2]), "has_xmlid": bool(r[3])}
+        for r in cur.fetchall()
+    ]
+
+
+def get_company_count(cur: psycopg.Cursor) -> int:
+    """Return total company count from res_company."""
+    cur.execute("SELECT count(*) FROM res_company")
+    return _fetch_one(cur)[0]
 
 
 def get_locks(cur: psycopg.Cursor, dbname: str) -> dict:
