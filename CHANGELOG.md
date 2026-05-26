@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.11.0 (2026-05-26)
+
+### Features
+
+- **prepare-audit**: Enrich audit bundle with orphan fields, customized records, and operational
+  stats
+  ([`3c8c2e7`](https://github.com/trobz/odoo-db/commit/3c8c2e772d7fc4abc4632abd9e7a0d3e0ac60fe2))
+
+
 ## v1.10.0 (2026-05-25)
 
 ### Features
