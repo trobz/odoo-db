@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.11.1 (2026-05-27)
+
+### Bug Fixes
+
+- **prepare-audit**: Guard ir_model_data.studio column in studio scan
+  ([`e6a30ec`](https://github.com/trobz/odoo-db/commit/e6a30ec107c966099f6f7d32b0f2469f6d3e2755))
+
+
 ## v1.11.0 (2026-05-26)
 
 ### Features
