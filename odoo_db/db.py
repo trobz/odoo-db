@@ -943,23 +943,36 @@ def get_studio_customizations(cur: psycopg.Cursor) -> dict:
     if has_studio_col:
         records_by_type = _studio_records_detail(cur)
 
-    # Extended models — full field detail grouped by model
+    # Extended models — full field detail grouped by model.
     # has_studio_tracking: field is recorded in ir_model_data with studio=True
-    # Fields without tracking were added outside Studio UI (RPC, XML, import…)
-    cur.execute("""
-        SELECT m.model, f.name, f.ttype, f.field_description,
-            f.relation, f.required, f.readonly, f.store,
-            EXISTS (
-                SELECT 1 FROM ir_model_data imd
-                WHERE imd.model = 'ir.model.fields'
-                  AND imd.res_id = f.id
-                  AND imd.studio = true
-            ) AS has_studio_tracking
-        FROM ir_model_fields f
-        JOIN ir_model m ON f.model_id = m.id
-        WHERE f.state = 'manual' AND m.state != 'manual'
-        ORDER BY m.model, f.name
-    """)
+    # (fields without tracking were added outside Studio UI — RPC, XML, import…).
+    # The ir_model_data.studio column only exists once web_studio is installed,
+    # so fall back to a constant `false` when it is absent.
+    if has_studio_col:
+        cur.execute("""
+            SELECT m.model, f.name, f.ttype, f.field_description,
+                f.relation, f.required, f.readonly, f.store,
+                EXISTS (
+                    SELECT 1 FROM ir_model_data imd
+                    WHERE imd.model = 'ir.model.fields'
+                      AND imd.res_id = f.id
+                      AND imd.studio = true
+                ) AS has_studio_tracking
+            FROM ir_model_fields f
+            JOIN ir_model m ON f.model_id = m.id
+            WHERE f.state = 'manual' AND m.state != 'manual'
+            ORDER BY m.model, f.name
+        """)
+    else:
+        cur.execute("""
+            SELECT m.model, f.name, f.ttype, f.field_description,
+                f.relation, f.required, f.readonly, f.store,
+                false AS has_studio_tracking
+            FROM ir_model_fields f
+            JOIN ir_model m ON f.model_id = m.id
+            WHERE f.state = 'manual' AND m.state != 'manual'
+            ORDER BY m.model, f.name
+        """)
     extended_by_model: dict[str, list[dict]] = {}
     for r in cur.fetchall():
         extended_by_model.setdefault(r[0], []).append({
