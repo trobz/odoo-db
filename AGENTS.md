@@ -41,6 +41,7 @@ odoo-db [--output-file FILE] [--output-format FORMAT] [--log-level LEVEL] [--log
 - `--output-format` — `text` (default), `json`, `prometheus`
 - `--log-level` — `DEBUG`, `INFO`, `WARNING` (default), `ERROR`
 - `--log-file` — optional; if omitted, logs go to console only
+- `--include-sensitive-information` — global PII master switch (default off)
 
 **Commands:** see `site-docs/docs/cli-reference.md` — auto-generated from
 the Typer app, exhaustive, always current. Read that file (or run
@@ -81,6 +82,25 @@ dump won't tell you):
   `odoo_db/db.py` under `_RECOGNIZED_FUNCTIONS` / `_RECOGNIZED_TRIGGERS`.
 - `crons --running` is transient debug data, intentionally excluded from
   `prepare-audit`.
+- `attachments` audits `ir.attachment` storage in pure SQL — no ORM, so it
+  sees field-backed rows (`image_1920`, logos, signatures) natively. The ORM's
+  `_search` auto-injects `res_field = False` and hides them; raw SQL has no
+  such filter, so totals count the whole table without the `res_field` OR
+  trick the odooly version needed. `file_size` is a stored column
+  (`len(data)` set at write time), reliable on any backend incl. S3-offloaded;
+  payloads (`db_datas`/`datas`) are never read. Storage split: DB =
+  `db_datas` set, filestore = `store_fname` set (mutually exclusive). Asset
+  bucket is the exact domain core's `regenerate_assets_bundles()` deletes.
+  Duplicate reclaim separates *logical* duplicated bytes from *real* disk
+  reclaim (filestore dedups by SHA1, so only db-stored dups reclaim disk).
+  Filenames are PII: `--include-individual-filenames` (or global
+  `--include-sensitive-information`) gates the `top_files` `name` column only.
+  Deliberately a standalone command, **not** folded into `prepare-audit` (per
+  maintainer steer) — the bundle keeps only rough per-table
+  `stats.attachment_size_bytes`; deep analysis lives here.
+- `--include-sensitive-information` is a global PII master switch on the root
+  callback (stored in `_include_sensitive`); a command's own opt-in flag is
+  OR'd with it (e.g. `attachments` filenames show if either is set).
 - `bloat` uses a two-tier engine. **Estimate (always):** statistical guess
   from `pg_class` (`relpages`/`reltuples`) + `pg_stats` avg column widths — no
   extension, any role, but coarse and stale-stats-sensitive; per-row overhead

@@ -24,6 +24,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `--output-format TEXT`: \[default: text\]
 * `--log-level TEXT`: \[default: WARNING\]
 * `--log-file TEXT`
+* `--include-sensitive-information`: Global PII master switch: unmask identifying data (e.g. attachment filenames) in any command that would otherwise redact it. Off by default so output is safe to ship.
 * `--install-completion`: Install completion for the current shell.
 * `--show-completion`: Show completion for the current shell, to copy it or customize the installation.
 * `--help`: Show this message and exit.
@@ -38,6 +39,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `locks`: Show active database locks for a database.
 * `stats`: Show per-table record counts and sizes for...
 * `bloat`: Estimate table + index bloat (reclaimable...
+* `attachments`: Audit ir.attachment storage: repartition +...
 * `studio`: Show Studio customizations: custom models,...
 * `not-odoo`: Show non-Odoo database objects: custom...
 * `prepare-audit`: Combine summary + modules + stats +...
@@ -191,6 +193,35 @@ $ odoo-db bloat [OPTIONS] DB
 
 * `-n, --top INTEGER`: Top relations by size to inspect  \[default: 25\]
 * `--exact-max-scan INTEGER`: Max relation size (MB) to measure exactly with pgstattuple; larger ones are estimated.  \[default: 2048\]
+* `--help`: Show this message and exit.
+
+## `odoo-db attachments`
+
+Audit ir.attachment storage: repartition + cleanup/archive candidates.
+
+Read-only — only metadata and file_size are read, never the payload. Sizes
+are file_size sums (reliable on any storage backend). Filenames are
+redacted by default; pass --include-individual-filenames (or the global
+--include-sensitive-information) to include them.
+
+**Usage**:
+
+```console
+$ odoo-db attachments [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
+* `-n, --top-models INTEGER`: Heaviest models to show (text)  \[default: 25\]
+* `--top-files INTEGER`: Largest single attachments to list  \[default: 20\]
+* `--validate-orphans`: Find attachments whose res_id no longer exists (heaviest models).
+* `--orphan-top-models INTEGER`: How many heaviest models to validate.  \[default: 15\]
+* `--orphan-max-scan INTEGER`: Skip orphan validation for models above this attachment count.  \[default: 50000\]
+* `--include-individual-filenames`: Show real filenames in the largest-attachments list (PII). Off by default; also enabled by the global --include-sensitive-information.
 * `--help`: Show this message and exit.
 
 ## `odoo-db studio`

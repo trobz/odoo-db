@@ -33,6 +33,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `--output-format` | `text` | Output format: `text`, `json`, `prometheus` |
 | `--log-level` | `WARNING` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `--log-file` | `logs/odoo-db.log` | Log file path (auto-created) |
+| `--include-sensitive-information` | off | PII master switch: unmask identifying data (e.g. attachment filenames) in any command that redacts it by default |
 
 **Commands:**
 
@@ -48,7 +49,8 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `bloat <db>` | Estimate table + index bloat — space reclaimable by `VACUUM FULL` / `REINDEX` / a dump+restore migration (autovacuum never returns it). Uses `pgstattuple` for exact figures when the extension is installed and the relation fits under `--exact-max-scan` (MB), else a cheap statistical estimate; each row is tagged `exact`/`est`. Also flags high dead-tuple ratios, stale autovacuum, and unused indexes (`idx_scan = 0`) |
 | `studio <db>` | Show Studio customizations: custom models, models extended with Studio fields, and studio-flagged record counts by type |
 | `not-odoo <db>` | Show non-Odoo database objects: custom views, triggers, functions, and stored procedures. Triggers/functions are tagged `recognized` (known infra: `unaccent`, `queue_job_notify`, …) or `custom` |
-| `prepare-audit <db>` | Bundle summary + modules + `model_owners` + `orphan_tables` + `users_by_year` + stats + not-odoo + `studio_customizations` into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables). `orphan_tables` flags tables not owned by any installed module (reason: `uninstalled_module` or `no_ownership_data`). Every table in `stats.tables` and `orphan_tables` carries `functional_group` (first underscore component) for display-time grouping by functional area. `users_by_year` is an aggregate `{year: count}` of active users by `create_date` year — zero PII so the file can ship without an NDA. `studio_customizations` includes custom model list, extended model list, and studio-flagged record counts by type |
+| `attachments <db>` | Read-only `ir.attachment` storage audit: repartition (storage location, by-model, mimetype family, size distribution, growth by year, largest files) plus cleanup/archive candidates (uninstalled-model orphans, regenerable asset bundles, duplicate checksums, aged transient, DB-stored bulk). `--validate-orphans` adds dead-`res_id` detection for the heaviest models. Sizes are `file_size` sums (reliable on any backend; payloads never read). Filenames are redacted by default — pass `--include-individual-filenames` (or the global `--include-sensitive-information`) to show them |
+| `prepare-audit <db>` | Bundle summary + modules + `model_owners` + `orphan_tables` + `users_by_year` + stats + not-odoo + `studio_customizations` into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables). `orphan_tables` flags tables not owned by any installed module (reason: `uninstalled_module` or `no_ownership_data`). Every table in `stats.tables` and `orphan_tables` carries `functional_group` (first underscore component) for display-time grouping by functional area. `users_by_year` is an aggregate `{year: count}` of active users by `create_date` year — zero PII so the file can ship without an NDA. `studio_customizations` includes custom model list, extended model list, and studio-flagged record counts by type. The deep attachment audit is intentionally a separate command (`attachments`), not bundled here |
 
 ## Examples
 
@@ -91,6 +93,15 @@ odoo-db not-odoo my_db
 
 # Export not-odoo report as JSON
 odoo-db --output-format json not-odoo my_db
+
+# Audit ir.attachment storage (repartition + cleanup candidates)
+odoo-db attachments my_db
+
+# Also validate dead-record orphans, and show real filenames (PII)
+odoo-db --include-sensitive-information attachments my_db --validate-orphans
+
+# Full attachment audit as JSON
+odoo-db --output-format json attachments my_db
 
 # Prepare an audit bundle (writes ./my_db.json in the current directory)
 odoo-db prepare-audit my_db

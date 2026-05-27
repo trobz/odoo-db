@@ -607,6 +607,472 @@ def get_orphan_tables(
     return orphans
 
 
+# Mimetype → coarse family, for the attachment audit's "by mimetype family"
+# repartition. Order matters: first matching test wins. Mirrors the families a
+# migration lead reasons about (where do the bytes go: images, PDFs, web
+# assets, office docs, …) rather than the raw mimetype long tail.
+_MIME_FAMILIES = (
+    ("image", lambda m: m.startswith("image/")),
+    ("pdf", lambda m: m == "application/pdf"),
+    ("assets (css/js)", lambda m: "javascript" in m or m.endswith("/css")),
+    (
+        "office",
+        lambda m: any(
+            k in m
+            for k in (
+                "spreadsheet",
+                "wordprocessing",
+                "presentation",
+                "ms-excel",
+                "msword",
+                "ms-powerpoint",
+                "officedocument",
+            )
+        ),
+    ),
+    ("archive", lambda m: any(k in m for k in ("zip", "x-tar", "x-gzip", "x-7z"))),
+    ("text", lambda m: m.startswith("text/")),
+    ("xml/json", lambda m: m in ("application/xml", "application/json")),
+)
+
+
+def _mime_family(mimetype: str | None) -> str:
+    m = (mimetype or "").lower()
+    if not m:
+        return "unknown"
+    for name, test in _MIME_FAMILIES:
+        if test(m):
+            return name
+    return "other"
+
+
+def get_attachments_audit(
+    cur: psycopg.Cursor,
+    *,
+    top_files: int = 20,
+    validate_orphans: bool = False,
+    orphan_top_models: int = 15,
+    orphan_max_scan: int = 50000,
+    include_filenames: bool = False,
+) -> dict:
+    """Read-only ``ir.attachment`` storage audit, computed entirely in SQL.
+
+    Where the attachment weight sits (repartition) and what can realistically
+    be deleted, archived, or offloaded (cleanup candidates). Only metadata and
+    ``file_size`` are read — attachment payloads (``db_datas`` / ``datas``) are
+    never touched.
+
+    Two facts make the raw-SQL version both correct *and* simpler than going
+    through the ORM:
+
+    - **Field-backed rows are visible for free.** ``ir.attachment._search``
+      auto-injects ``res_field = False`` (hiding ``image_1920``, company logos,
+      report logos, signatures) unless the domain references ``res_field`` —
+      and that filter applies to ``read_group`` too. A plain ``SELECT`` over
+      the table has no such filter, so totals naturally count the whole table.
+    - **``file_size`` is a stored column**, set to ``len(data)`` at write time
+      by ``_get_datas_related_values`` *before* the storage backend is chosen.
+      It is reliable on any backend (filestore, DB, S3-offloaded); only
+      ``type='url'`` rows leave it NULL. So a ``sum(file_size)`` is real bytes,
+      not a disk estimate.
+
+    Storage split follows Odoo's own field semantics: a row lives in the DB iff
+    ``db_datas`` is set, on the filestore iff ``store_fname`` is set (mutually
+    exclusive per ``_get_datas_related_values``); rows with neither carry no
+    binary payload (url type, or empty).
+
+    PII: ``include_filenames`` gates the per-file ``name`` column in
+    ``top_files`` only — every other field is aggregate / non-identifying. Keep
+    it ``False`` for any export that leaves the customer's box.
+    """
+    data: dict = {}
+
+    cur.execute("SELECT count(*), COALESCE(sum(file_size), 0) FROM ir_attachment")
+    total_count, total_size = _fetch_one(cur)
+    data["total_count"] = total_count
+    data["total_size_bytes"] = int(total_size)
+
+    # by type (binary vs url vs empty)
+    cur.execute("""
+        SELECT COALESCE(type, 'unknown'), count(*), COALESCE(sum(file_size), 0)
+        FROM ir_attachment GROUP BY type ORDER BY 3 DESC
+    """)
+    data["by_type"] = [{"type": r[0], "count": r[1], "size": int(r[2])} for r in cur.fetchall()]
+
+    # storage location + public, in one pass
+    cur.execute("""
+        SELECT
+            count(*) FILTER (WHERE db_datas IS NOT NULL),
+            COALESCE(sum(file_size) FILTER (WHERE db_datas IS NOT NULL), 0),
+            count(*) FILTER (WHERE store_fname IS NOT NULL),
+            COALESCE(sum(file_size) FILTER (WHERE store_fname IS NOT NULL), 0),
+            count(*) FILTER (WHERE db_datas IS NULL AND store_fname IS NULL),
+            COALESCE(sum(file_size) FILTER (WHERE db_datas IS NULL AND store_fname IS NULL), 0),
+            count(*) FILTER (WHERE public),
+            COALESCE(sum(file_size) FILTER (WHERE public), 0)
+        FROM ir_attachment
+    """)
+    r = _fetch_one(cur)
+    data["storage"] = {
+        "db": {"count": r[0], "size": int(r[1])},
+        "filestore": {"count": r[2], "size": int(r[3])},
+        "none": {"count": r[4], "size": int(r[5])},
+    }
+    data["public"] = {"count": r[6], "size": int(r[7])}
+
+    # field-backed vs standalone
+    cur.execute("""
+        SELECT
+            count(*) FILTER (WHERE res_field IS NOT NULL),
+            COALESCE(sum(file_size) FILTER (WHERE res_field IS NOT NULL), 0),
+            count(*) FILTER (WHERE res_field IS NULL),
+            COALESCE(sum(file_size) FILTER (WHERE res_field IS NULL), 0)
+        FROM ir_attachment
+    """)
+    r = _fetch_one(cur)
+    data["by_field"] = {
+        "field_backed": {"count": r[0], "size": int(r[1])},
+        "standalone": {"count": r[2], "size": int(r[3])},
+    }
+
+    # by res_model (heaviest first)
+    cur.execute("""
+        SELECT COALESCE(res_model, ''), count(*), COALESCE(sum(file_size), 0)
+        FROM ir_attachment GROUP BY res_model ORDER BY 3 DESC
+    """)
+    by_model = [{"model": r[0], "count": r[1], "size": int(r[2])} for r in cur.fetchall()]
+    data["by_model"] = by_model
+
+    # by mimetype, bucketed into families in Python
+    cur.execute("""
+        SELECT mimetype, count(*), COALESCE(sum(file_size), 0)
+        FROM ir_attachment GROUP BY mimetype
+    """)
+    fam: dict[str, dict[str, int]] = {}
+    for mimetype, cnt, size in cur.fetchall():
+        agg = fam.setdefault(_mime_family(mimetype), {"count": 0, "size": 0})
+        agg["count"] += cnt
+        agg["size"] += int(size)
+    data["by_mime"] = [{"family": k, **v} for k, v in sorted(fam.items(), key=lambda kv: kv[1]["size"], reverse=True)]
+
+    # by create_date year
+    cur.execute("""
+        SELECT EXTRACT(year FROM create_date)::int AS yr, count(*), COALESCE(sum(file_size), 0)
+        FROM ir_attachment WHERE create_date IS NOT NULL GROUP BY yr ORDER BY yr
+    """)
+    data["by_year"] = {str(r[0]): {"count": r[1], "size": int(r[2])} for r in cur.fetchall()}
+
+    # size distribution — where the bytes physically concentrate (0-byte rows
+    # excluded; they are url/empty placeholders)
+    cur.execute("""
+        SELECT
+            count(*) FILTER (WHERE file_size > 0 AND file_size <= 10240),
+            COALESCE(sum(file_size) FILTER (WHERE file_size > 0 AND file_size <= 10240), 0),
+            count(*) FILTER (WHERE file_size > 10240 AND file_size <= 102400),
+            COALESCE(sum(file_size) FILTER (WHERE file_size > 10240 AND file_size <= 102400), 0),
+            count(*) FILTER (WHERE file_size > 102400 AND file_size <= 1048576),
+            COALESCE(sum(file_size) FILTER (WHERE file_size > 102400 AND file_size <= 1048576), 0),
+            count(*) FILTER (WHERE file_size > 1048576 AND file_size <= 10485760),
+            COALESCE(sum(file_size) FILTER (WHERE file_size > 1048576 AND file_size <= 10485760), 0),
+            count(*) FILTER (WHERE file_size > 10485760),
+            COALESCE(sum(file_size) FILTER (WHERE file_size > 10485760), 0)
+        FROM ir_attachment
+    """)
+    r = _fetch_one(cur)
+    labels = ["<= 10 KB", "10-100 KB", "100 KB-1 MB", "1-10 MB", "> 10 MB"]
+    data["size_buckets"] = [
+        {"label": labels[i], "count": r[2 * i], "size": int(r[2 * i + 1])} for i in range(len(labels))
+    ]
+
+    # largest single attachments (file_size>0 to skip url/empty NULLs). The
+    # name column is PII, so it is only selected when explicitly requested.
+    if include_filenames:
+        cur.execute(
+            "SELECT name, res_model, mimetype, file_size FROM ir_attachment "
+            "WHERE file_size > 0 ORDER BY file_size DESC LIMIT %s",
+            (top_files,),
+        )
+    else:
+        cur.execute(
+            "SELECT res_model, mimetype, file_size FROM ir_attachment "
+            "WHERE file_size > 0 ORDER BY file_size DESC LIMIT %s",
+            (top_files,),
+        )
+    top = []
+    for row in cur.fetchall():
+        entry: dict = {}
+        if include_filenames:
+            entry["name"] = row[0]
+            res_model, mimetype, file_size = row[1], row[2], row[3]
+        else:
+            res_model, mimetype, file_size = row[0], row[1], row[2]
+        entry["res_model"] = res_model or ""
+        entry["mimetype"] = (mimetype or "").split(";")[0]
+        entry["size"] = int(file_size or 0)
+        top.append(entry)
+    data["top_files"] = top
+
+    # config governing storage + image policy (missing key = Odoo default)
+    cur.execute("""
+        SELECT key, value FROM ir_config_parameter
+        WHERE key IN (
+            'ir_attachment.location',
+            'base.image_autoresize_max_px',
+            'base.image_autoresize_quality'
+        )
+    """)
+    params = {row[0]: row[1] for row in cur.fetchall()}
+    data["config"] = {
+        "location": params.get("ir_attachment.location", "file (default)"),
+        "image_max": params.get("base.image_autoresize_max_px", "1920x1920 (default)"),
+        "image_quality": params.get("base.image_autoresize_quality", "80 (default)"),
+    }
+
+    data["candidates"] = _attachment_candidates(cur, by_model, data["by_year"], data["storage"])
+
+    data["orphans_validated"] = None
+    if validate_orphans:
+        data["orphans_validated"] = _validate_attachment_orphans(
+            cur, by_model, top_n=orphan_top_models, max_scan=orphan_max_scan
+        )
+
+    return data
+
+
+def _dup_stats(cur: psycopg.Cursor, db_only: bool) -> dict:
+    """Duplicate-checksum surplus: extra rows and the bytes they represent.
+
+    Filestore keeps ONE physical file per checksum (``_file_write`` SHA1 path),
+    so filestore duplicates reclaim ``ir_attachment`` rows but ~0 disk. Real
+    byte reclaim comes from DB-stored duplicates only — hence the ``db_only``
+    split, so the headline disk number stays honest. Per-group surplus bytes
+    are ``group_size * (count - 1) / count`` (integer division, matching the
+    reference implementation).
+    """
+    if db_only:
+        cur.execute("""
+            SELECT count(*), COALESCE(sum(c - 1), 0), COALESCE(sum((grp_size * (c - 1)) / c), 0)
+            FROM (
+                SELECT count(*) AS c, sum(file_size) AS grp_size
+                FROM ir_attachment WHERE checksum IS NOT NULL AND db_datas IS NOT NULL
+                GROUP BY checksum HAVING count(*) > 1
+            ) g
+        """)
+    else:
+        cur.execute("""
+            SELECT count(*), COALESCE(sum(c - 1), 0), COALESCE(sum((grp_size * (c - 1)) / c), 0)
+            FROM (
+                SELECT count(*) AS c, sum(file_size) AS grp_size
+                FROM ir_attachment WHERE checksum IS NOT NULL
+                GROUP BY checksum HAVING count(*) > 1
+            ) g
+        """)
+    groups, rows, size = _fetch_one(cur)
+    return {"groups": groups, "rows": rows, "size": int(size)}
+
+
+def _attachment_candidates(
+    cur: psycopg.Cursor,
+    by_model: list[dict],
+    by_year: dict[str, dict],
+    storage: dict,
+) -> dict:
+    """Cheap cleanup buckets, ordered safest → needs-judgement."""
+    cand: dict = {}
+
+    cur.execute("SELECT model FROM ir_model")
+    valid = {row[0] for row in cur.fetchall()}
+
+    # 1. uninstalled-model orphans: res_model not registered in ir_model
+    orphan_models = [m for m in by_model if m["model"] and m["model"] not in valid]
+    cand["orphan_uninstalled"] = {
+        "count": sum(m["count"] for m in orphan_models),
+        "size": sum(m["size"] for m in orphan_models),
+        "rows": sorted(orphan_models, key=lambda m: m["size"], reverse=True),
+        "note": (
+            "res_model not registered in ir_model (module uninstalled or typo). "
+            "Safe to delete once the module is confirmed gone for good."
+        ),
+    }
+
+    # 2. regenerable web asset bundles — the exact domain Odoo core's own
+    # ir.attachment.regenerate_assets_bundles() unlinks; the server rebuilds
+    # them on demand.
+    cur.execute("""
+        SELECT count(*), COALESCE(sum(file_size), 0)
+        FROM ir_attachment
+        WHERE public = true AND url LIKE '/web/assets/%'
+          AND res_model = 'ir.ui.view' AND res_id = 0
+    """)
+    a_count, a_size = _fetch_one(cur)
+    cand["assets"] = {
+        "count": a_count,
+        "size": int(a_size),
+        "note": (
+            "Compiled /web/assets/* bundles. Exactly what Odoo's own "
+            "regenerate_assets_bundles() deletes; the server rebuilds them on "
+            "demand. Pure win."
+        ),
+    }
+
+    # 3. duplicates (same checksum)
+    overall = _dup_stats(cur, db_only=False)
+    db_dups = _dup_stats(cur, db_only=True)
+    cand["duplicates"] = {
+        "count": overall["rows"],
+        "size": db_dups["size"],
+        "groups": overall["groups"],
+        "logical_size": overall["size"],
+        "db_reclaim": db_dups["size"],
+        "db_rows": db_dups["rows"],
+        "note": (
+            "Rows sharing a checksum. Filestore stores one physical file per "
+            "checksum, so filestore dups reclaim ir_attachment rows but ~0 disk. "
+            "Real byte reclaim comes from db-stored dups only."
+        ),
+    }
+
+    # cutoff = start of the second-newest year with data
+    years_sorted = sorted((y for y in by_year if y.isdigit()), reverse=True)
+    cutoff = f"{years_sorted[1]}-01-01" if len(years_sorted) >= 2 else None
+
+    # 4. aged transient sets
+    aged_rows: dict[str, dict] = {}
+    if cutoff:
+        cur.execute(
+            "SELECT count(*), COALESCE(sum(file_size), 0) FROM ir_attachment "
+            "WHERE res_model = 'mail.message' AND create_date < %s",
+            (cutoff,),
+        )
+        c, s = _fetch_one(cur)
+        aged_rows["mail.message"] = {"count": c, "size": int(s)}
+        cur.execute(
+            "SELECT count(*), COALESCE(sum(file_size), 0) FROM ir_attachment "
+            "WHERE mimetype = 'application/pdf' AND create_date < %s",
+            (cutoff,),
+        )
+        c, s = _fetch_one(cur)
+        aged_rows["old PDFs"] = {"count": c, "size": int(s)}
+    cand["aged"] = {
+        "cutoff": cutoff,
+        "rows": aged_rows,
+        "note": (
+            f"Created before {cutoff}. Candidates to archive off-box, not necessarily delete."
+            if cutoff
+            else "Not enough year history."
+        ),
+    }
+
+    # 4b. archive-by-age per heaviest model — "archive?" turned into tonnage
+    archive_rows: list[dict] = []
+    if cutoff:
+        heavy = [m["model"] for m in by_model[:10] if m["model"]]
+        if heavy:
+            cur.execute(
+                "SELECT res_model, count(*), COALESCE(sum(file_size), 0) "
+                "FROM ir_attachment WHERE res_model = ANY(%s) AND create_date < %s "
+                "GROUP BY res_model",
+                (heavy, cutoff),
+            )
+            aged_by_model = {r[0]: {"count": r[1], "size": int(r[2])} for r in cur.fetchall()}
+            totals = {m["model"]: m["size"] for m in by_model}
+            for model in heavy:
+                a = aged_by_model.get(model)
+                if a and a["size"] > 0:
+                    archive_rows.append({
+                        "model": model,
+                        "count": a["count"],
+                        "size": a["size"],
+                        "total": totals.get(model, 0),
+                    })
+            archive_rows.sort(key=lambda r: r["size"], reverse=True)
+    cand["archive_by_model"] = {
+        "cutoff": cutoff,
+        "rows": archive_rows,
+        "note": (
+            f"Of each heavy model's attachments, how much predates {cutoff} — "
+            "the concrete tonnage movable to cold/off-box storage."
+            if cutoff
+            else "Not enough year history."
+        ),
+    }
+
+    # 5. db-stored bulk (the location=db → file migration win)
+    cand["db_bulk"] = {
+        "count": storage["db"]["count"],
+        "size": storage["db"]["size"],
+        "note": (
+            "Binaries stored in the DB (db_datas set). Migrating "
+            "ir_attachment.location from 'db' to 'file' moves these to the "
+            "filestore and is usually the single biggest DB-size reduction."
+        ),
+    }
+
+    return cand
+
+
+def _validate_attachment_orphans(
+    cur: psycopg.Cursor,
+    by_model: list[dict],
+    *,
+    top_n: int,
+    max_scan: int,
+) -> list[dict]:
+    """For the top-N heaviest models, find attachments whose ``res_id`` no
+    longer points to a live record (the strongest delete signal).
+
+    Resolves each model's table via the ``replace('.', '_')`` convention and
+    skips it if no such table exists (abstract model, table-name override) or
+    if its attachment count exceeds ``max_scan``. The dead-row test is a single
+    indexed ``LEFT JOIN ... WHERE t.id IS NULL`` per model — cheap in SQL,
+    unlike the per-id existence batches the ORM version needs.
+    """
+    # Models registered in ir_model (dotted form, e.g. "sale.order"). Skip
+    # res_model values that point nowhere — uninstalled module, typo, generic
+    # placeholder. Resolving them to a table would either fail or hit the
+    # wrong table.
+    cur.execute("SELECT model FROM ir_model")
+    registered_models = {row[0] for row in cur.fetchall()}
+    cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+    real_tables = {row[0] for row in cur.fetchall()}
+
+    findings: list[dict] = []
+    scanned = 0
+    for m in by_model:
+        if scanned >= top_n:
+            break
+        model = m["model"]
+        if not model or model not in registered_models:
+            continue
+        table = model.replace(".", "_")
+        if table not in real_tables:
+            continue
+        scanned += 1
+        if m["count"] > max_scan:
+            findings.append({
+                "model": model,
+                "skipped": True,
+                "reason": f"{m['count']:,} attachments > max-scan {max_scan:,}",
+            })
+            continue
+        cur.execute(
+            sql.SQL("""
+                SELECT
+                    count(*) FILTER (WHERE a.res_id IS NOT NULL AND a.res_id <> 0),
+                    count(*) FILTER (WHERE a.res_id IS NOT NULL AND a.res_id <> 0 AND t.id IS NULL),
+                    COALESCE(sum(a.file_size) FILTER (
+                        WHERE a.res_id IS NOT NULL AND a.res_id <> 0 AND t.id IS NULL), 0)
+                FROM ir_attachment a
+                LEFT JOIN {} t ON t.id = a.res_id
+                WHERE a.res_model = %s
+            """).format(sql.Identifier(table)),
+            (model,),
+        )
+        checked, dead, dead_size = _fetch_one(cur)
+        findings.append({"model": model, "checked": checked, "dead_count": dead, "dead_size": int(dead_size)})
+    return findings
+
+
 def _as_str(val: object) -> str:
     """Coerce a value to str, handling Odoo 16+ JSONB translated fields.
 

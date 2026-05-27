@@ -38,6 +38,7 @@ def _handle_errors(db_name: str):
 
 _output_file: str | None = None
 _output_format: str = "text"
+_include_sensitive: bool = False
 
 
 @app.callback()
@@ -46,10 +47,19 @@ def main(
     output_format: Annotated[str, typer.Option("--output-format")] = "text",
     log_level: Annotated[str, typer.Option("--log-level")] = "WARNING",
     log_file: Annotated[str | None, typer.Option("--log-file")] = None,
+    include_sensitive: Annotated[
+        bool,
+        typer.Option(
+            "--include-sensitive-information",
+            help="Global PII master switch: unmask identifying data (e.g. attachment filenames) "
+            "in any command that would otherwise redact it. Off by default so output is safe to ship.",
+        ),
+    ] = False,
 ):
-    global _output_file, _output_format
+    global _output_file, _output_format, _include_sensitive
     _output_file = None if output_file == "-" else output_file
     _output_format = output_format
+    _include_sensitive = include_sensitive
 
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     root = logging.getLogger()
@@ -509,6 +519,193 @@ def bloat(
             )
             w.text("  Fix in place: REINDEX INDEX CONCURRENTLY <name> / VACUUM (FULL) <table>.")
             w.text("  Or reclaim all at once via a dump+restore migration (rebuilds every relation compactly).")
+
+
+# ---------------------------------------------------------------------------
+# attachments
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def attachments(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    top_models: Annotated[int, typer.Option("--top-models", "-n", help="Heaviest models to show (text)")] = 25,
+    top_files: Annotated[int, typer.Option("--top-files", help="Largest single attachments to list")] = 20,
+    validate_orphans: Annotated[
+        bool,
+        typer.Option("--validate-orphans", help="Find attachments whose res_id no longer exists (heaviest models)."),
+    ] = False,
+    orphan_top_models: Annotated[
+        int, typer.Option("--orphan-top-models", help="How many heaviest models to validate.")
+    ] = 15,
+    orphan_max_scan: Annotated[
+        int, typer.Option("--orphan-max-scan", help="Skip orphan validation for models above this attachment count.")
+    ] = 50000,
+    include_individual_filenames: Annotated[
+        bool,
+        typer.Option(
+            "--include-individual-filenames",
+            help="Show real filenames in the largest-attachments list (PII). "
+            "Off by default; also enabled by the global --include-sensitive-information.",
+        ),
+    ] = False,
+):
+    """Audit ir.attachment storage: repartition + cleanup/archive candidates.
+
+    Read-only — only metadata and file_size are read, never the payload. Sizes
+    are file_size sums (reliable on any storage backend). Filenames are
+    redacted by default; pass --include-individual-filenames (or the global
+    --include-sensitive-information) to include them.
+    """
+    include_filenames = _include_sensitive or include_individual_filenames
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        data = db.get_attachments_audit(
+            cur,
+            top_files=top_files,
+            validate_orphans=validate_orphans,
+            orphan_top_models=orphan_top_models,
+            orphan_max_scan=orphan_max_scan,
+            include_filenames=include_filenames,
+        )
+
+    st = data["storage"]
+    cand = data["candidates"]
+    dup = cand["duplicates"]
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(data)
+        elif w.fmt == "prometheus":
+            lbl = f'db="{db_name}"'
+            lines = [
+                "# HELP odoo_db_attachments_total Total ir.attachment count",
+                "# TYPE odoo_db_attachments_total gauge",
+                f"odoo_db_attachments_total{{{lbl}}} {data['total_count']}",
+                "# HELP odoo_db_attachments_size_bytes Total attachment size (file_size sum)",
+                "# TYPE odoo_db_attachments_size_bytes gauge",
+                f"odoo_db_attachments_size_bytes{{{lbl}}} {data['total_size_bytes']}",
+                "# HELP odoo_db_attachments_storage_bytes Attachment size by storage location",
+                "# TYPE odoo_db_attachments_storage_bytes gauge",
+                f'odoo_db_attachments_storage_bytes{{{lbl},location="db"}} {st["db"]["size"]}',
+                f'odoo_db_attachments_storage_bytes{{{lbl},location="filestore"}} {st["filestore"]["size"]}',
+                f'odoo_db_attachments_storage_bytes{{{lbl},location="none"}} {st["none"]["size"]}',
+                "# HELP odoo_db_attachments_public Public (URL-downloadable) attachment count",
+                "# TYPE odoo_db_attachments_public gauge",
+                f"odoo_db_attachments_public{{{lbl}}} {data['public']['count']}",
+                "# HELP odoo_db_attachments_reclaim_bytes Reclaimable attachment bytes by bucket",
+                "# TYPE odoo_db_attachments_reclaim_bytes gauge",
+            ]
+            reclaim = {
+                "assets": cand["assets"]["size"],
+                "orphan_uninstalled": cand["orphan_uninstalled"]["size"],
+                "duplicates_db": dup["db_reclaim"],
+            }
+            for bucket, size in reclaim.items():
+                lines.append(f'odoo_db_attachments_reclaim_bytes{{{lbl},bucket="{bucket}"}} {size}')
+            w.prometheus(lines)
+        else:
+            total = data["total_size_bytes"]
+            cfg = data["config"]
+            w.text(f"Attachments: {data['total_count']:,}   Total size: {_fmt_bytes(total)}")
+            w.text(
+                f"Storage: db {_fmt_bytes(st['db']['size'])} ({st['db']['count']:,})  ·  "
+                f"filestore {_fmt_bytes(st['filestore']['size'])} ({st['filestore']['count']:,})  ·  "
+                f"no payload {st['none']['count']:,}"
+            )
+            w.text(f"Config: location={cfg['location']}  image_max={cfg['image_max']}  quality={cfg['image_quality']}")
+            if data["public"]["count"]:
+                w.text(
+                    f"Public (URL-downloadable): {data['public']['count']:,} "
+                    f"({_fmt_bytes(data['public']['size'])}) — review for sensitive data"
+                )
+            w.text("")
+            shown = data["by_model"][:top_models]
+            w.text(f"Top {len(shown)} models by attachment size:")
+            w.text("  attach size = sum of file_size of attachments linked to the model (not the table's own size)")
+            w.text("  avg/file = attach size / files   ·   % total = share of all attachment bytes")
+            model_rows = [
+                [
+                    m["model"] or "(unattached)",
+                    f"{m['count']:,}",
+                    _fmt_bytes(m["size"]),
+                    _fmt_bytes(m["size"] // m["count"]) if m["count"] else "—",
+                    f"{(100 * m['size'] / total) if total else 0:.1f}%",
+                ]
+                for m in shown
+            ]
+            shown_count = sum(m["count"] for m in shown)
+            shown_size = sum(m["size"] for m in shown)
+            footer = [
+                f"top {len(shown)}",
+                f"{shown_count:,}",
+                _fmt_bytes(shown_size),
+                _fmt_bytes(shown_size // shown_count) if shown_count else "—",
+                f"{(100 * shown_size / total) if total else 0:.1f}%",
+            ]
+            w.table(["res_model", "files", "attach size", "avg/file", "% total"], model_rows, footer=footer)
+            w.text("")
+            w.text("Largest single attachments (one file each):")
+            headers = ["file size", "model", "mimetype"] + (["name"] if include_filenames else [])
+            w.table(
+                headers,
+                [
+                    [_fmt_bytes(t["size"]), t["res_model"] or "—", t["mimetype"] or "—"]
+                    + ([t.get("name") or ""] if include_filenames else [])
+                    for t in data["top_files"]
+                ],
+            )
+            w.text("")
+            w.text("Reclaimable — at a glance:")
+            ou = cand["orphan_uninstalled"]
+            scorecard = [
+                [
+                    "Regenerable asset bundles",
+                    f"{cand['assets']['count']:,}",
+                    _fmt_bytes(cand["assets"]["size"]),
+                    "delete (auto-rebuilt)",
+                ],
+                [
+                    "Uninstalled-model orphans",
+                    f"{ou['count']:,}",
+                    _fmt_bytes(ou["size"]),
+                    "delete (verify module gone)",
+                ],
+                [
+                    "DB->filestore migration",
+                    f"{cand['db_bulk']['count']:,}",
+                    _fmt_bytes(cand["db_bulk"]["size"]),
+                    "move (shrinks DB)",
+                ],
+                [
+                    "Duplicate rows",
+                    f"{dup['count']:,}",
+                    _fmt_bytes(dup["db_reclaim"]),
+                    "DB rows; disk only from db dups",
+                ],
+            ]
+            dead_sz = 0
+            if data["orphans_validated"] is not None:
+                dead_n = sum(f.get("dead_count", 0) for f in data["orphans_validated"])
+                dead_sz = sum(f.get("dead_size", 0) for f in data["orphans_validated"])
+                scorecard.insert(2, ["Dead-record orphans", f"{dead_n:,}", _fmt_bytes(dead_sz), "delete"])
+            w.table(["action", "rows", "disk reclaim", "type"], scorecard)
+
+            # Adaptive recommendation: safe delete-now reclaim = assets + orphans
+            # (+ validated dead records). When that is a small slice of the total,
+            # deletion is not the lever — storage tiering / archiving is.
+            safe_disk = cand["assets"]["size"] + ou["size"] + dead_sz
+            safe_pct = (100 * safe_disk / total) if total else 0
+            w.text("")
+            w.text(f"Safe delete-now reclaim (assets + orphans): {_fmt_bytes(safe_disk)} = {safe_pct:.1f}% of total.")
+            if safe_pct < 10:
+                w.text(
+                    "  → Deletion is not the lever here. Offload the filestore to cheaper object storage "
+                    "(S3-compatible via ir_attachment.location) and archive aged data per the buckets above."
+                )
+            else:
+                w.text("  → Delete the safe buckets first, then weigh archiving aged data.")
+            if data["orphans_validated"] is None:
+                w.text("  (run with --validate-orphans to fold dead-record orphans into this number)")
 
 
 # ---------------------------------------------------------------------------

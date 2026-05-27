@@ -45,8 +45,27 @@ odoo-db jobs <db>         # queue_job counts by state
 odoo-db locks <db>        # active PostgreSQL locks
 odoo-db stats <db>        # per-table record counts and sizes
 odoo-db not-odoo <db>     # custom views, triggers, functions
+odoo-db attachments <db>  # ir.attachment storage audit (repartition + cleanup)
 odoo-db bloat <db>        # table + index bloat (reclaimable space)
 ```
+
+## Audit attachment storage
+
+`attachments` is a read-only audit of `ir.attachment`: where the storage
+weight sits (by storage location, model, mimetype family, size, and year)
+and what can realistically be reclaimed (uninstalled-model orphans,
+regenerable asset bundles, duplicate checksums, aged transient, DB-stored
+bulk).
+
+```bash
+odoo-db attachments <db>                    # repartition + cleanup candidates
+odoo-db attachments <db> --validate-orphans # + dead-record (stale res_id) detection
+```
+
+Sizes are `file_size` sums (reliable on any backend; attachment payloads are
+never read). Filenames are redacted by default — pass
+`--include-individual-filenames`, or the global
+`--include-sensitive-information`, to include them.
 
 ## Estimate bloat (reclaimable space)
 
@@ -63,6 +82,7 @@ relations under `--exact-max-scan` MB); otherwise it falls back to a cheap
 statistical estimate. Each row is tagged `exact` or `est`, and the header tells
 you which engine ran — install `pgstattuple` for exact numbers. It also flags
 unused indexes (`idx_scan = 0`) and tables whose autovacuum is falling behind.
+
 
 ## Generate an audit bundle
 
