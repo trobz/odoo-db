@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.12.1 (2026-05-28)
+
+### Bug Fixes
+
+- **prepare-audit**: Enhance model filtering and include noupdate flag
+  ([`2ff3e6c`](https://github.com/trobz/odoo-db/commit/2ff3e6c4d55c174086d93b36e8bf691f354c40f4))
+
+
 ## v1.12.0 (2026-05-28)
 
 ### Features
