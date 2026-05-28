@@ -1042,12 +1042,14 @@ def get_customized_system_records(cur: psycopg.Cursor, exclude_logins: list[str]
     per model — skips tables that don't exist or lack write_uid (m2m relation
     tables, etc.). Returns per-record detail: module, model, xml_id, modified_by.
     """
-    # All distinct models referenced by real modules
+    # All distinct models referenced by real modules (must exist in ir_module_module;
+    # excludes fake import namespaces like 'import_hr' used during CSV imports)
     cur.execute("""
         SELECT DISTINCT model
-        FROM ir_model_data
+        FROM ir_model_data imd
         WHERE module NOT IN ('__export__', '__import__', '__custom__', '__base__')
           AND module NOT LIKE '%studio%'
+          AND EXISTS (SELECT 1 FROM ir_module_module m WHERE m.name = imd.module)
         ORDER BY model
     """)
     candidate_models = [r[0] for r in cur.fetchall()]
@@ -1082,13 +1084,14 @@ def get_customized_system_records(cur: psycopg.Cursor, exclude_logins: list[str]
             params["excl"] = excluded
         cur.execute(
             sql.SQL("""
-            SELECT imd.module, imd.name, u.login
+            SELECT imd.module, imd.name, u.login, imd.noupdate
             FROM ir_model_data imd
             JOIN {tbl} t ON t.id = imd.res_id
             LEFT JOIN res_users u ON u.id = t.write_uid
             WHERE imd.model = %(model)s
               AND imd.module NOT IN ('__export__', '__import__', '__custom__', '__base__')
               AND imd.module NOT LIKE '%%studio%%'
+              AND EXISTS (SELECT 1 FROM ir_module_module mm WHERE mm.name = imd.module)
               AND t.write_uid IS NOT NULL
               AND t.write_uid != 1
               {excl}
@@ -1097,7 +1100,13 @@ def get_customized_system_records(cur: psycopg.Cursor, exclude_logins: list[str]
             params,
         )
         for r in cur.fetchall():
-            results.append({"model": model, "module": r[0], "xml_id": r[1], "modified_by": r[2]})
+            results.append({
+                "model": model,
+                "module": r[0],
+                "xml_id": r[1],
+                "modified_by": r[2],
+                "noupdate": bool(r[3]),
+            })
     return results
 
 
