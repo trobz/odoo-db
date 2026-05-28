@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.12.0 (2026-05-28)
+
+### Features
+
+- **bloat**: Table + index bloat command (pgstattuple + estimate)
+  ([`98129af`](https://github.com/trobz/odoo-db/commit/98129af6c590fdf107663b80ebffc4ac915b3201))
+
+
 ## v1.11.1 (2026-05-27)
 
 ### Bug Fixes
