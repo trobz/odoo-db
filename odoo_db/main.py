@@ -390,6 +390,128 @@ def stats(
 
 
 # ---------------------------------------------------------------------------
+# bloat
+# ---------------------------------------------------------------------------
+
+
+def _fmt_dt(value: object) -> str:
+    return str(value)[:16] if value else "never"
+
+
+@app.command()
+def bloat(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    top: Annotated[int, typer.Option("--top", "-n", help="Top relations by size to inspect")] = 25,
+    exact_max_scan_mb: Annotated[
+        int,
+        typer.Option(
+            "--exact-max-scan",
+            help="Max relation size (MB) to measure exactly with pgstattuple; larger ones are estimated.",
+        ),
+    ] = 2048,
+):
+    """Estimate table + index bloat (reclaimable by VACUUM FULL / REINDEX / dump+restore).
+
+    Uses pgstattuple for exact numbers when the extension is installed (and the
+    relation fits under --exact-max-scan), otherwise a cheap statistical
+    estimate. Each row is tagged `exact` or `est`. Also flags high dead-tuple
+    ratios, stale autovacuum, and unused indexes.
+    """
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        data = db.get_bloat(cur, top=top, exact_max_scan_bytes=exact_max_scan_mb * 1024 * 1024)
+
+    tables = data["tables"]
+    indexes = data["indexes"]
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(data)
+        elif w.fmt == "prometheus":
+            lines = [
+                "# HELP odoo_db_bloat_bytes Estimated/measured reclaimable bytes per relation",
+                "# TYPE odoo_db_bloat_bytes gauge",
+            ]
+            for t in tables:
+                if t["bloat_bytes"] is not None:
+                    lines.append(
+                        f'odoo_db_bloat_bytes{{db="{db_name}",kind="table",'
+                        f'relation="{t["table"]}",method="{t["method"]}"}} {t["bloat_bytes"]}'
+                    )
+            for i in indexes:
+                if i["bloat_bytes"] is not None:
+                    lines.append(
+                        f'odoo_db_bloat_bytes{{db="{db_name}",kind="index",'
+                        f'relation="{i["index"]}",method="{i["method"]}"}} {i["bloat_bytes"]}'
+                    )
+            w.prometheus(lines)
+        else:
+            if data["pgstattuple_available"]:
+                w.text(
+                    f"Engine: pgstattuple (exact ≤ {exact_max_scan_mb} MB) + estimate fallback  ·  "
+                    f"{data['exact_count']} exact, {data['estimate_count']} estimated"
+                )
+            else:
+                w.text("Engine: estimate only (pgstattuple not installed). Figures marked `est` are approximate.")
+                w.text("  → For exact numbers: connect as superuser and run  CREATE EXTENSION pgstattuple;")
+            w.text("  bloat   = dead tuples + free space, reclaimable by VACUUM FULL / REINDEX / dump+restore")
+            w.text("            (autovacuum frees space inside files but never shrinks them, so bloat persists)")
+            w.text("  dead %  = tuples already dead but not yet vacuumed — separate from bloat's free space")
+            w.text("  scans   = index uses since last stats reset; UNUSED = 0 (drop candidate, but not PK/unique;")
+            w.text("            counter resets on restore, so a fresh DB shows false UNUSED)")
+            w.text("  via n/a = bloat not measurable (non-btree e.g. GIN/GiST, or expression index) → shown as —")
+            since = str(data["scan_stats_since"])[:16] if data["scan_stats_since"] else "unknown"
+            since_kind = "stats_reset" if data["scan_stats_since_is_reset"] else "cluster start"
+            w.text(
+                f"  scan stats since {since} ({since_kind}) · {data['xact_commit']:,} txns committed "
+                "— UNUSED unreliable on freshly restored / low-traffic DBs"
+            )
+            w.text("")
+
+            table_bloat = sum(t["bloat_bytes"] or 0 for t in tables)
+            index_bloat = sum(i["bloat_bytes"] or 0 for i in indexes)
+            w.text(f"Top {len(tables)} tables by size:")
+            w.table(
+                ["table", "size", "bloat", "bloat %", "via", "dead %", "last autovac"],
+                [
+                    [
+                        t["table"],
+                        _fmt_bytes(t["size_bytes"]),
+                        _fmt_bytes(t["bloat_bytes"]) if t["bloat_bytes"] is not None else "—",
+                        f"{t['bloat_pct']:.1f}%" if t["bloat_bytes"] is not None else "—",
+                        t["method"],
+                        f"{t['dead_pct']:.1f}%",
+                        _fmt_dt(t["last_autovacuum"]),
+                    ]
+                    for t in tables
+                ],
+            )
+            w.text("")
+            w.text(f"Top {len(indexes)} indexes by size:")
+            w.table(
+                ["index", "table", "size", "bloat", "bloat %", "via", "scans"],
+                [
+                    [
+                        i["index"],
+                        i["table"],
+                        _fmt_bytes(i["size_bytes"]),
+                        _fmt_bytes(i["bloat_bytes"]) if i["bloat_bytes"] is not None else "—",
+                        f"{i['bloat_pct']:.1f}%" if i["bloat_bytes"] is not None else "—",
+                        i["method"],
+                        "UNUSED" if i["unused"] else f"{i['idx_scan']:,}",
+                    ]
+                    for i in indexes
+                ],
+            )
+            w.text("")
+            w.text(
+                f"Reclaimable in shown relations: ~{_fmt_bytes(table_bloat)} table + "
+                f"~{_fmt_bytes(index_bloat)} index = ~{_fmt_bytes(table_bloat + index_bloat)}."
+            )
+            w.text("  Fix in place: REINDEX INDEX CONCURRENTLY <name> / VACUUM (FULL) <table>.")
+            w.text("  Or reclaim all at once via a dump+restore migration (rebuilds every relation compactly).")
+
+
+# ---------------------------------------------------------------------------
 # studio
 # ---------------------------------------------------------------------------
 

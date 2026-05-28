@@ -45,7 +45,24 @@ odoo-db jobs <db>         # queue_job counts by state
 odoo-db locks <db>        # active PostgreSQL locks
 odoo-db stats <db>        # per-table record counts and sizes
 odoo-db not-odoo <db>     # custom views, triggers, functions
+odoo-db bloat <db>        # table + index bloat (reclaimable space)
 ```
+
+## Estimate bloat (reclaimable space)
+
+`bloat` reports how much space tables and indexes hold beyond what their live
+rows need — dead tuples and half-empty pages that `VACUUM FULL`, `REINDEX`, or
+a dump+restore migration would give back (autovacuum never does).
+
+```bash
+odoo-db bloat <db>
+```
+
+When the `pgstattuple` extension is installed it measures exact figures (for
+relations under `--exact-max-scan` MB); otherwise it falls back to a cheap
+statistical estimate. Each row is tagged `exact` or `est`, and the header tells
+you which engine ran — install `pgstattuple` for exact numbers. It also flags
+unused indexes (`idx_scan = 0`) and tables whose autovacuum is falling behind.
 
 ## Generate an audit bundle
 

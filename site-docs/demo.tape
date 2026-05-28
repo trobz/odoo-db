@@ -1,5 +1,5 @@
 # odoo-db terminal demo
-# Showcases: --help, modules, prepare-audit
+# Showcases: --help, modules, prepare-audit, bloat
 
 # ── Output ────────────────────────────────────────────────────────────────────
 Output ./docs/demo.gif
@@ -11,7 +11,7 @@ Require odoo-db
 Set Shell bash
 Set TypingSpeed 25ms
 Set Width 2300
-Set Height 1600
+Set Height 2400
 Set FontSize 49
 Set FontFamily "JetBrains Mono, Fira Code, monospace"
 Set Theme { "name": "odoo-db", "background": "#111111", "foreground": "#f5f5f5", "cursor": "#ff6b35", "black": "#2a2a2a", "red": "#ef4444", "green": "#22c55e", "yellow": "#eab308", "blue": "#3b82f6", "magenta": "#d946ef", "cyan": "#06b6d4", "white": "#f5f5f5", "brightBlack": "#52525b", "brightRed": "#f87171", "brightGreen": "#4ade80", "brightYellow": "#facc15", "brightBlue": "#60a5fa", "brightMagenta": "#e879f9", "brightCyan": "#22d3ee", "brightWhite": "#ffffff" }
@@ -68,3 +68,16 @@ Sleep 400ms
 Enter
 
 Sleep 3s
+
+# ── Scene 4: estimate reclaimable bloat ───────────────────────────────────────
+Hide
+Type "clear"
+Enter
+Show
+
+Sleep 500ms
+Type "odoo-db bloat mydb --top 3"
+Sleep 400ms
+Enter
+
+Sleep 6s

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -1160,6 +1161,233 @@ def get_company_count(cur: psycopg.Cursor) -> int:
     """Return total company count from res_company."""
     cur.execute("SELECT count(*) FROM res_company")
     return _fetch_one(cur)[0]
+
+
+# Per-row overhead used by the statistical bloat estimate. Deliberately
+# coarse — the estimate is a triage signal, not a measurement (run with
+# pgstattuple for exact numbers). Heap: 23-byte HeapTupleHeader rounded to 24
+# + 4-byte line pointer. Btree: 8-byte IndexTupleData header + 4-byte line
+# pointer; default btree fillfactor is 90.
+_HEAP_TUPLE_OVERHEAD = 24 + 4
+_BTREE_ENTRY_OVERHEAD = 8 + 4
+_BTREE_FILLFACTOR = 0.90
+_PAGE_HEADER = 24
+
+
+def _bloat_estimate_pages(ntuples: int, entry_bytes: int, usable_per_page: float) -> int:
+    if ntuples <= 0 or entry_bytes <= 0 or usable_per_page <= 0:
+        return 0
+    return math.ceil(ntuples * entry_bytes / usable_per_page)
+
+
+def get_bloat(
+    cur: psycopg.Cursor,
+    *,
+    top: int = 25,
+    exact_max_scan_bytes: int = 2 * 1024**3,
+) -> dict:
+    """Table + index bloat for the heaviest relations, with a two-tier engine.
+
+    Bloat = physical size held by a relation beyond what its live rows need —
+    dead tuples not yet reclaimed plus half-empty pages VACUUM cannot compact.
+    It is the space a ``VACUUM FULL`` / ``REINDEX`` or a dump+restore migration
+    would give back. Autovacuum never returns it (it frees space *inside* the
+    files for reuse but never shrinks them, and never re-indexes).
+
+    Two engines, combined per the caller's privileges:
+
+    - **Estimate (always):** a cheap statistical guess from ``pg_class``
+      (``relpages``/``reltuples``) and ``pg_stats`` average column widths. No
+      extension, read-only, runs as any role. Coarse — labelled ``est`` — and
+      can be off when stats are stale (run ``ANALYZE`` first) or for fat-column
+      / TOAST-heavy tables.
+    - **Exact (overlay):** when the ``pgstattuple`` extension is installed and a
+      relation is at or under ``exact_max_scan_bytes``, ``pgstattuple`` /
+      ``pgstatindex`` measure real dead space — but they *full-scan* the
+      relation, hence the size cap. Rows measured this way are labelled
+      ``exact`` and override the estimate.
+
+    Also surfaces cheap, exact health signals from ``pg_stat_user_tables`` /
+    ``pg_stat_user_indexes``: dead-tuple ratio + ``last_autovacuum`` (is
+    autovacuum keeping up / is an xmin holder blocking cleanup?) and
+    ``idx_scan = 0`` (unused index — a different kind of dead weight).
+
+    ``pgstattuple_available`` and the per-row ``method`` let the caller tell the
+    user which strategy produced each number and recommend installing the
+    extension for exactness.
+    """
+    cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'pgstattuple'")
+    has_pgstattuple = bool(cur.fetchone())
+
+    cur.execute("SELECT current_setting('block_size')::int")
+    bs = _fetch_one(cur)[0]
+    usable = bs - _PAGE_HEADER
+
+    # Context for judging the idx_scan ("unused") signal: how long counters
+    # have accumulated and how busy the DB has been. idx_scan resets to 0 on
+    # restore / pg_stat_reset, so on a fresh or low-traffic copy "unused" is
+    # mostly false. stats_reset is NULL when never reset → fall back to the
+    # cluster start time.
+    cur.execute(
+        """
+        SELECT COALESCE(stats_reset, pg_postmaster_start_time()), stats_reset IS NOT NULL, xact_commit
+        FROM pg_stat_database WHERE datname = current_database()
+        """
+    )
+    scan_since, scan_since_is_reset, xact_commit = _fetch_one(cur)
+
+    # heaviest regular tables (by heap size — bloat lives in the heap)
+    cur.execute(
+        """
+        SELECT c.oid, c.relname, c.reltuples::bigint, pg_relation_size(c.oid)
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r'
+        ORDER BY pg_relation_size(c.oid) DESC
+        LIMIT %s
+        """,
+        (top,),
+    )
+    table_rows = cur.fetchall()
+    table_names = [r[1] for r in table_rows]
+
+    # avg row width (sum of per-column avg_width) for those tables
+    cur.execute(
+        """
+        SELECT tablename, COALESCE(sum(avg_width), 0)
+        FROM pg_stats WHERE schemaname = 'public' AND tablename = ANY(%s)
+        GROUP BY tablename
+        """,
+        (table_names,),
+    )
+    row_width = {r[0]: int(r[1]) for r in cur.fetchall()}
+
+    # exact, cheap health signals
+    cur.execute(
+        """
+        SELECT relname, n_live_tup, n_dead_tup, last_autovacuum
+        FROM pg_stat_user_tables WHERE schemaname = 'public' AND relname = ANY(%s)
+        """,
+        (table_names,),
+    )
+    tstat = {r[0]: {"live": r[1], "dead": r[2], "last_autovacuum": r[3]} for r in cur.fetchall()}
+
+    exact_count = estimate_count = 0
+    tables: list[dict] = []
+    for oid, name, reltuples, heap_bytes in table_rows:
+        width = row_width.get(name, 0)
+        est_pages = _bloat_estimate_pages(reltuples, width + _HEAP_TUPLE_OVERHEAD, usable)
+        est_bytes = est_pages * bs
+        bloat_bytes = max(0, heap_bytes - est_bytes) if width and reltuples > 0 else None
+        method = "est" if bloat_bytes is not None else "n/a"
+
+        if has_pgstattuple and heap_bytes <= exact_max_scan_bytes:
+            try:
+                cur.execute("SELECT dead_tuple_len, free_space FROM pgstattuple(%s)", (oid,))
+                dead_len, free_space = _fetch_one(cur)
+                bloat_bytes = int(dead_len) + int(free_space)
+                method = "exact"
+            except Exception as exc:
+                logger.debug("pgstattuple failed for %s: %s", name, exc)
+
+        exact_count += method == "exact"
+        estimate_count += method == "est"
+        st = tstat.get(name, {})
+        dead = st.get("dead") or 0
+        live = st.get("live") or 0
+        tables.append({
+            "table": name,
+            "size_bytes": heap_bytes,
+            "bloat_bytes": bloat_bytes,
+            "bloat_pct": round(100 * bloat_bytes / heap_bytes, 1) if bloat_bytes and heap_bytes else 0.0,
+            "method": method,
+            "dead_tuples": dead,
+            "dead_pct": round(100 * dead / (live + dead), 1) if (live + dead) else 0.0,
+            "last_autovacuum": st.get("last_autovacuum"),
+        })
+
+    # btree indexes on those tables (estimate needs key column widths)
+    cur.execute(
+        """
+        SELECT i.indexrelid, ic.relname, tc.relname, pg_relation_size(i.indexrelid),
+               am.amname, COALESCE(st.idx_scan, 0), tc.reltuples::bigint,
+               string_to_array(i.indkey::text, ' ')::int[]
+        FROM pg_index i
+        JOIN pg_class ic ON ic.oid = i.indexrelid
+        JOIN pg_class tc ON tc.oid = i.indrelid
+        JOIN pg_am am ON am.oid = ic.relam
+        JOIN pg_namespace n ON n.oid = ic.relnamespace
+        LEFT JOIN pg_stat_user_indexes st ON st.indexrelid = i.indexrelid
+        WHERE n.nspname = 'public' AND tc.relname = ANY(%s)
+        ORDER BY pg_relation_size(i.indexrelid) DESC
+        LIMIT %s
+        """,
+        (table_names, top),
+    )
+    index_rows = cur.fetchall()
+
+    # map (table, attnum) -> avg_width so we can size index key columns
+    cur.execute(
+        """
+        SELECT s.tablename, a.attnum, s.avg_width
+        FROM pg_stats s
+        JOIN pg_class c ON c.relname = s.tablename
+        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = s.schemaname
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = s.attname
+        WHERE s.schemaname = 'public' AND s.tablename = ANY(%s)
+        """,
+        (table_names,),
+    )
+    col_width: dict[tuple[str, int], int] = {(r[0], r[1]): int(r[2]) for r in cur.fetchall()}
+
+    indexes: list[dict] = []
+    for idxoid, idxname, tblname, idx_bytes, amname, idx_scan, reltuples, indkey in index_rows:
+        bloat_bytes = None
+        method = "n/a"
+        if amname == "btree" and reltuples > 0 and indkey and 0 not in indkey:
+            key_width = sum(col_width.get((tblname, att), 0) for att in indkey)
+            if key_width:
+                entry = key_width + _BTREE_ENTRY_OVERHEAD
+                est_pages = _bloat_estimate_pages(reltuples, entry, usable * _BTREE_FILLFACTOR)
+                est_bytes = est_pages * bs
+                bloat_bytes = max(0, idx_bytes - est_bytes)
+                method = "est"
+
+        if has_pgstattuple and amname == "btree" and idx_bytes <= exact_max_scan_bytes:
+            try:
+                cur.execute("SELECT avg_leaf_density FROM pgstatindex(%s)", (idxoid,))
+                density = float(_fetch_one(cur)[0] or 0)
+                ratio = max(0.0, 1 - density / (100 * _BTREE_FILLFACTOR))
+                bloat_bytes = int(idx_bytes * ratio)
+                method = "exact"
+            except Exception as exc:
+                logger.debug("pgstatindex failed for %s: %s", idxname, exc)
+
+        exact_count += method == "exact"
+        estimate_count += method == "est"
+        indexes.append({
+            "index": idxname,
+            "table": tblname,
+            "access_method": amname,
+            "size_bytes": idx_bytes,
+            "bloat_bytes": bloat_bytes,
+            "bloat_pct": round(100 * bloat_bytes / idx_bytes, 1) if bloat_bytes and idx_bytes else 0.0,
+            "method": method,
+            "idx_scan": idx_scan,
+            "unused": idx_scan == 0,
+        })
+
+    return {
+        "pgstattuple_available": has_pgstattuple,
+        "exact_max_scan_bytes": exact_max_scan_bytes,
+        "exact_count": exact_count,
+        "estimate_count": estimate_count,
+        "scan_stats_since": scan_since,
+        "scan_stats_since_is_reset": scan_since_is_reset,
+        "xact_commit": xact_commit,
+        "tables": tables,
+        "indexes": indexes,
+    }
 
 
 def get_locks(cur: psycopg.Cursor, dbname: str) -> dict:

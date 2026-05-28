@@ -37,6 +37,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `users`: List active users for a database.
 * `locks`: Show active database locks for a database.
 * `stats`: Show per-table record counts and sizes for...
+* `bloat`: Estimate table + index bloat (reclaimable...
 * `studio`: Show Studio customizations: custom models,...
 * `not-odoo`: Show non-Odoo database objects: custom...
 * `prepare-audit`: Combine summary + modules + stats +...
@@ -165,6 +166,31 @@ $ odoo-db stats [OPTIONS] DB
 
 * `-y, --years INTEGER`: Number of years to show  \[default: 3\]
 * `-n, --top INTEGER`: Number of top tables to show  \[default: 20\]
+* `--help`: Show this message and exit.
+
+## `odoo-db bloat`
+
+Estimate table + index bloat (reclaimable by VACUUM FULL / REINDEX / dump+restore).
+
+Uses pgstattuple for exact numbers when the extension is installed (and the
+relation fits under --exact-max-scan), otherwise a cheap statistical
+estimate. Each row is tagged `exact` or `est`. Also flags high dead-tuple
+ratios, stale autovacuum, and unused indexes.
+
+**Usage**:
+
+```console
+$ odoo-db bloat [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
+* `-n, --top INTEGER`: Top relations by size to inspect  \[default: 25\]
+* `--exact-max-scan INTEGER`: Max relation size (MB) to measure exactly with pgstattuple; larger ones are estimated.  \[default: 2048\]
 * `--help`: Show this message and exit.
 
 ## `odoo-db studio`

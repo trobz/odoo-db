@@ -45,6 +45,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `users <db>` | List active users with connection status |
 | `locks <db>` | Show active PostgreSQL locks |
 | `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`). Tables with 0-byte heap are reported as empty without running `count(*)` |
+| `bloat <db>` | Estimate table + index bloat — space reclaimable by `VACUUM FULL` / `REINDEX` / a dump+restore migration (autovacuum never returns it). Uses `pgstattuple` for exact figures when the extension is installed and the relation fits under `--exact-max-scan` (MB), else a cheap statistical estimate; each row is tagged `exact`/`est`. Also flags high dead-tuple ratios, stale autovacuum, and unused indexes (`idx_scan = 0`) |
 | `studio <db>` | Show Studio customizations: custom models, models extended with Studio fields, and studio-flagged record counts by type |
 | `not-odoo <db>` | Show non-Odoo database objects: custom views, triggers, functions, and stored procedures. Triggers/functions are tagged `recognized` (known infra: `unaccent`, `queue_job_notify`, …) or `custom` |
 | `prepare-audit <db>` | Bundle summary + modules + `model_owners` + `orphan_tables` + `users_by_year` + stats + not-odoo + `studio_customizations` into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables). `orphan_tables` flags tables not owned by any installed module (reason: `uninstalled_module` or `no_ownership_data`). Every table in `stats.tables` and `orphan_tables` carries `functional_group` (first underscore component) for display-time grouping by functional area. `users_by_year` is an aggregate `{year: count}` of active users by `create_date` year — zero PII so the file can ship without an NDA. `studio_customizations` includes custom model list, extended model list, and studio-flagged record counts by type |
@@ -75,6 +76,9 @@ odoo-db stats my_db
 
 # Top 10 tables, last 5 years
 odoo-db stats my_db --top 10 --years 5
+
+# Estimate table + index bloat (reclaimable space)
+odoo-db bloat my_db
 
 # Debug mode with full logging
 odoo-db --log-level debug list

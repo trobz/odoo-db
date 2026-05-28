@@ -81,6 +81,19 @@ dump won't tell you):
   `odoo_db/db.py` under `_RECOGNIZED_FUNCTIONS` / `_RECOGNIZED_TRIGGERS`.
 - `crons --running` is transient debug data, intentionally excluded from
   `prepare-audit`.
+- `bloat` uses a two-tier engine. **Estimate (always):** statistical guess
+  from `pg_class` (`relpages`/`reltuples`) + `pg_stats` avg column widths — no
+  extension, any role, but coarse and stale-stats-sensitive; per-row overhead
+  constants live in `db.py` (`_HEAP_TUPLE_OVERHEAD`, `_BTREE_ENTRY_OVERHEAD`,
+  `_BTREE_FILLFACTOR`). **Exact overlay:** `pgstattuple`/`pgstatindex` when the
+  extension exists *and* the relation is ≤ `--exact-max-scan` (they full-scan,
+  hence the cap). Each row carries `method` = `exact`/`est`/`n/a`; `n/a` = btree
+  estimate impossible (expression index, no column stats) or non-btree. Index
+  exact bloat is derived from `avg_leaf_density` vs the 90% btree fillfactor.
+  Cheap exact signals (`dead_pct`, `last_autovacuum`, `idx_scan = 0` unused)
+  come straight from `pg_stat_user_*`. Autovacuum never reclaims bloat — only
+  `VACUUM FULL`/`REINDEX`/dump+restore do; the report frames the number as that
+  win. Standalone command, not in `prepare-audit`.
 
 **Key SQL for `list`:**
 ```sql
