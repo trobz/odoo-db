@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.13.0 (2026-06-02)
+
+### Features
+
+- **attachments**: Ir.attachment storage audit command
+  ([`245bd06`](https://github.com/trobz/odoo-db/commit/245bd0627cda1431db46ef24028b8fdb9586deaa))
+
+
 ## v1.12.1 (2026-05-28)
 
 ### Bug Fixes
