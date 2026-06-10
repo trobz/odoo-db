@@ -4,6 +4,7 @@ import json
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
 
@@ -41,8 +42,24 @@ _output_format: str = "text"
 _include_sensitive: bool = False
 
 
+def version_callback(value: bool):
+    if value:
+        typer.echo(f"odoo-db {version('odoo-db')}")
+        raise typer.Exit()
+
+
 @app.callback()
 def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            callback=version_callback,
+            is_eager=True,
+            help="Display the odoo-db version.",
+        ),
+    ] = False,
     output_file: Annotated[str, typer.Option("--output-file")] = "-",
     output_format: Annotated[str, typer.Option("--output-format")] = "text",
     log_level: Annotated[str, typer.Option("--log-level")] = "WARNING",
