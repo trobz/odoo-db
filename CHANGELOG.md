@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.14.0 (2026-06-19)
+
+### Features
+
+- Have option to show version
+  ([`702e81d`](https://github.com/trobz/odoo-db/commit/702e81d2f7c991c1477ebac12edc3c6c919e5cf9))
+
+
 ## v1.13.0 (2026-06-02)
 
 ### Features
