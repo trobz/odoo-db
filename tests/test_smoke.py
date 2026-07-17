@@ -1,3 +1,5 @@
+import string
+
 from typer.testing import CliRunner
 
 from odoo_db.db import (
@@ -8,6 +10,7 @@ from odoo_db.db import (
     _validate_attachment_orphans,
     compute_role_drift,
     filter_online_users,
+    generate_password,
     get_config_parameters,
     get_modules,
     get_users,
@@ -213,6 +216,30 @@ def test_crons_help():
     assert result.exit_code == 0
     assert "--include-code" in result.output
     assert "--all" in result.output
+
+
+def test_dump_help():
+    result = runner.invoke(app, ["dump", "--help"])
+    assert result.exit_code == 0
+
+
+def test_restore_help():
+    result = runner.invoke(app, ["restore", "--help"])
+    assert result.exit_code == 0
+
+
+def test_generate_password_length():
+    assert len(generate_password()) == 16
+    assert len(generate_password(24)) == 24
+
+
+def test_generate_password_charset():
+    allowed = set(string.ascii_letters + string.digits)
+    assert set(generate_password(200)).issubset(allowed)
+
+
+def test_generate_password_random():
+    assert generate_password(32) != generate_password(32)
 
 
 def test_global_sensitive_flag_exists():
