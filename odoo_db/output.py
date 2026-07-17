@@ -48,7 +48,7 @@ class Writer:
         console.print(t)
 
     def json(self, data: Any):
-        self._write(json.dumps(data, indent=2, default=str))
+        self._write(json.dumps(data, indent=2, default=str, ensure_ascii=False))
 
     def prometheus(self, lines: list[str]):
         for line in lines:

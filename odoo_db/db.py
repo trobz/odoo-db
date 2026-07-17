@@ -428,6 +428,433 @@ def get_users_by_year(cur: psycopg.Cursor) -> dict[int, int]:
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
+def _localize(value: dict[str, str | None] | str | None, lang: str = "en_US") -> str:
+    """Normalize a translated Char/Text field value.
+
+    Odoo 16+ stores translated fields as jsonb (``{"en_US": "...", ...}``);
+    older versions return the plain string directly. Falls back to any
+    available translation if ``lang`` is missing or its value is falsy
+    (e.g. ``{"en_US": None}``) — ``next(iter(value.values()), "")`` alone
+    would still yield that ``None`` (the fallback default only fires on an
+    *empty* iterator, not a falsy first value), which callers expecting a
+    ``str`` (like ``rich``'s table renderer) would choke on.
+    """
+    if isinstance(value, dict):
+        return value.get(lang) or next((v for v in value.values() if v), "")
+    return value or ""
+
+
+def _trans_implied(cur: psycopg.Cursor, seed_group_ids: list[int]) -> dict[int, set[int]]:
+    """Transitive closure of ``res.groups.implied_ids`` for each seed group id.
+
+    ``trans_implied_ids`` is compute-only on the Odoo side (not a column), so
+    this walks ``res_groups_implied_rel`` (a row ``(gid, hid)`` means "group
+    ``gid`` implies group ``hid``") with a recursive CTE. Returns
+    ``{seed_id: {implied group ids, direct + transitive}}``. Note: if a cycle
+    in the implied graph loops back to the seed, the seed's own id *can*
+    appear in its own set — this isn't filtered out. The sole caller
+    (``get_roles``) is unaffected either way, since it re-adds the seed via
+    ``{group_id} | trans_implied(group_id)``, a set union that's a no-op if
+    the seed is already present.
+    """
+    if not seed_group_ids:
+        return {}
+    cur.execute(
+        """
+        WITH RECURSIVE implied(seed, gid) AS (
+            SELECT gid, hid FROM res_groups_implied_rel WHERE gid = ANY(%s)
+            UNION
+            SELECT i.seed, r.hid
+            FROM res_groups_implied_rel r
+            JOIN implied i ON r.gid = i.gid
+        )
+        SELECT DISTINCT seed, gid FROM implied
+        """,
+        (seed_group_ids,),
+    )
+    result: dict[int, set[int]] = {gid: set() for gid in seed_group_ids}
+    for seed, gid in cur.fetchall():
+        result[seed].add(gid)
+    return result
+
+
+def _groups_category_sql(cur: psycopg.Cursor) -> tuple[str, str]:
+    """``(select_cols, join_sql)`` for the group -> category link, version-branched.
+
+    Odoo 19 dropped ``res_groups.category_id`` in favor of an intermediate
+    ``res_groups.privilege_id`` -> ``res_groups_privilege.category_id`` ->
+    ``ir_module_category`` chain. Both branches select the same 4 columns
+    (privilege id/name, category id/name) so every call site unpacks rows the
+    same way regardless of version; ``privilege`` is simply ``NULL`` on
+    <= 18.0. Keeping ``category`` mapped to ``ir_module_category`` on both
+    versions matters — it keeps the JSON comparable across a v16 -> v19
+    migration audit, which is the point of the tool.
+
+    The probe resolves ``res_groups`` via ``to_regclass`` (same name
+    resolution — respecting ``search_path`` — that the unqualified
+    ``FROM res_groups`` in the real queries below gets) and checks
+    ``pg_attribute`` directly, rather than scanning
+    ``information_schema.columns`` by bare table name across every schema on
+    the search path. The latter lets an unrelated schema with its own
+    ``res_groups(privilege_id)`` column flip a <= 18.0 database into the 19.0
+    branch, which then queries a nonexistent ``res_groups_privilege`` and
+    crashes — a plantable DoS in a database being audited.
+    """
+    cur.execute("""
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass('res_groups') AND attname = 'privilege_id' AND NOT attisdropped
+    """)
+    if cur.fetchone():  # 19.0+
+        return (
+            "p.id, p.name, mc.id, mc.name",
+            "LEFT JOIN res_groups_privilege p ON p.id = g.privilege_id "
+            "LEFT JOIN ir_module_category mc ON mc.id = p.category_id",
+        )
+    return (  # <= 18.0
+        "NULL, NULL, mc.id, mc.name",
+        "LEFT JOIN ir_module_category mc ON mc.id = g.category_id",
+    )
+
+
+def get_groups(
+    cur: psycopg.Cursor, include_users: bool = False, include_acls: bool = False
+) -> list[dict] | dict[str, list[dict]]:
+    """List all ``res.groups`` with category, optionally members and ACLs.
+
+    Plain ``list[dict]`` unless ``include_acls=True``, in which case returns
+    ``{"groups": [...], "global_acls": [...], "global_rules": [...]}``
+    instead. An ``ir.model.access``/``ir.rule`` row with no group at all
+    (``group_id IS NULL`` / ``ir.rule.global = true``) grants/restricts
+    *every* user — the highest-value rows in a permission audit (a model
+    readable by everyone would otherwise look unreachable in the report).
+    They can't be attributed to a single group's ``acls``, hence the
+    top-level siblings rather than duplicating them into every group.
+    """
+    # select_cols/join_sql are one of the two fixed literal pairs returned by
+    # _groups_category_sql — never user or row data, so the f-string is safe.
+    # ty can't see that: it wants a LiteralString, which a dynamically-built
+    # (but still internally-fixed) query string can never satisfy.
+    select_cols, join_sql = _groups_category_sql(cur)
+    # No SQL ORDER BY on name/category: both are jsonb on Odoo 16+ (translate=True),
+    # so postgres would sort by key-count then key/value pairs — deterministic but
+    # unrelated to the localized string a reader actually sees. Sort in Python below,
+    # after _localize(), instead.
+    cur.execute(f"""
+        SELECT g.id, g.name, {select_cols}, g.comment, g.share
+        FROM res_groups g
+        {join_sql}
+    """)  # noqa: S608  # ty: ignore[no-matching-overload]
+    groups: list[dict] = [
+        {
+            "id": row[0],
+            "name": _localize(row[1]),
+            "privilege_id": row[2],
+            "privilege": _localize(row[3]) if row[3] else None,
+            "category_id": row[4],
+            "category": _localize(row[5]) if row[5] is not None else None,
+            "comment": _localize(row[6]) if row[6] else "",
+            "share": bool(row[7]),
+        }
+        for row in cur.fetchall()
+    ]
+    groups.sort(key=lambda g: (g["category"] or "", g["name"] or ""))
+
+    if include_users:
+        # WHERE u.active = true mirrors get_roles' member query: archived users
+        # drop from both group membership and role membership, so compute_role_drift
+        # never sees an inactive user holding a role's marker group with no matching
+        # role row (which would surface as phantom extra_groups drift), and
+        # `groups --include-users` counts don't overstate live membership.
+        cur.execute("""
+            SELECT r.gid, u.login
+            FROM res_groups_users_rel r
+            JOIN res_users u ON u.id = r.uid
+            WHERE u.active = true
+            ORDER BY r.gid, u.login
+        """)
+        users_by_group: dict[int, list[str]] = {}
+        for gid, login in cur.fetchall():
+            users_by_group.setdefault(gid, []).append(login)
+        for g in groups:
+            g["users"] = users_by_group.get(g["id"], [])
+
+    if not include_acls:
+        return groups
+
+    # No group_id filter: an access row with group_id IS NULL applies to
+    # every user, and ima.active excludes archived (no longer enforced) rows.
+    cur.execute("""
+        SELECT ima.group_id, im.model, ima.perm_read, ima.perm_write, ima.perm_create, ima.perm_unlink
+        FROM ir_model_access ima
+        JOIN ir_model im ON im.id = ima.model_id
+        WHERE ima.active = true
+        ORDER BY ima.group_id, im.model
+    """)
+    access_by_group: dict[int | None, list[dict]] = {}
+    for gid, model, perm_read, perm_write, perm_create, perm_unlink in cur.fetchall():
+        access_by_group.setdefault(gid, []).append({
+            "model": model,
+            "read": bool(perm_read),
+            "write": bool(perm_write),
+            "create": bool(perm_create),
+            "unlink": bool(perm_unlink),
+        })
+    global_acls = access_by_group.pop(None, [])
+
+    # LEFT JOIN from ir_rule (not rule_group_rel) so a rule with no linked
+    # group at all (ir_rule.global = true — applies regardless of the user's
+    # groups) still surfaces, as a single NULL-group_id row, instead of
+    # silently disappearing the way the prior INNER JOIN did.
+    cur.execute("""
+        SELECT rgr.group_id, r.name, im.model, r.domain_force,
+               r.perm_read, r.perm_write, r.perm_create, r.perm_unlink
+        FROM ir_rule r
+        JOIN ir_model im ON im.id = r.model_id
+        LEFT JOIN rule_group_rel rgr ON rgr.rule_group_id = r.id
+        WHERE r.active = true
+        ORDER BY rgr.group_id, im.model
+    """)
+    rules_by_group: dict[int | None, list[dict]] = {}
+    for gid, name, model, domain_force, perm_read, perm_write, perm_create, perm_unlink in cur.fetchall():
+        # ir_rule.name is plain varchar (not translate=True) on every version
+        # checked, unlike res.groups.name/comment above — no _localize() needed.
+        rules_by_group.setdefault(gid, []).append({
+            "name": name,
+            "model": model,
+            "domain": domain_force,
+            "read": bool(perm_read),
+            "write": bool(perm_write),
+            "create": bool(perm_create),
+            "unlink": bool(perm_unlink),
+        })
+    global_rules = rules_by_group.pop(None, [])
+
+    for g in groups:
+        g["acls"] = {
+            "model_access": access_by_group.get(g["id"], []),
+            "rules": rules_by_group.get(g["id"], []),
+        }
+
+    return {"groups": groups, "global_acls": global_acls, "global_rules": global_rules}
+
+
+def get_roles(cur: psycopg.Cursor, include_users: bool = False, include_groups: bool = False) -> list[dict] | None:
+    """List ``res.users.role`` (OCA ``base_user_role``). ``None`` if the module isn't installed.
+
+    ``res_users_role`` delegates (``_inherits``) to ``res.groups`` via
+    ``group_id`` — name/category live on the joined ``res_groups`` row, not
+    on ``res_users_role`` itself. A role's full granted-group set is
+    ``{group_id} | trans_implied(group_id)``.
+    """
+    cur.execute(
+        "SELECT 1 FROM ir_module_module WHERE name = %s AND state = %s",
+        ("base_user_role", "installed"),
+    )
+    if not cur.fetchone():
+        return None
+
+    # select_cols/join_sql are one of the two fixed literal pairs returned by
+    # _groups_category_sql — never user or row data, so the f-string is safe.
+    # ty can't see that: it wants a LiteralString, which a dynamically-built
+    # (but still internally-fixed) query string can never satisfy.
+    select_cols, join_sql = _groups_category_sql(cur)
+    # No SQL ORDER BY: g.name (res_groups.name) is jsonb on Odoo 16+
+    # (translate=True) — see the same note in get_groups. Sort in Python below.
+    cur.execute(f"""
+        SELECT ur.id, ur.group_id, g.name, {select_cols}, g.comment
+        FROM res_users_role ur
+        JOIN res_groups g ON g.id = ur.group_id
+        {join_sql}
+    """)  # noqa: S608  # ty: ignore[no-matching-overload]
+    roles: list[dict] = [
+        {
+            "id": row[0],
+            "group_id": row[1],
+            "name": _localize(row[2]),
+            "privilege_id": row[3],
+            "privilege": _localize(row[4]) if row[4] else None,
+            "category_id": row[5],
+            "category": _localize(row[6]) if row[6] is not None else None,
+            "comment": _localize(row[7]) if row[7] else "",
+        }
+        for row in cur.fetchall()
+    ]
+    roles.sort(key=lambda r: r["name"] or "")
+
+    if include_users:
+        cur.execute("""
+            SELECT rl.role_id, u.login
+            FROM res_users_role_line rl
+            JOIN res_users u ON u.id = rl.user_id
+            WHERE u.active = true
+              AND (rl.date_from IS NULL OR rl.date_from <= CURRENT_DATE)
+              AND (rl.date_to IS NULL OR rl.date_to >= CURRENT_DATE)
+            ORDER BY rl.role_id, u.login
+        """)
+        users_by_role: dict[int, list[str]] = {}
+        for role_id, login in cur.fetchall():
+            users_by_role.setdefault(role_id, []).append(login)
+        for r in roles:
+            r["users"] = users_by_role.get(r["id"], [])
+
+    if include_groups:
+        closure = _trans_implied(cur, [r["group_id"] for r in roles])
+        all_gids = {r["group_id"] for r in roles} | {gid for gids in closure.values() for gid in gids}
+        # select_cols/join_sql are one of the two fixed literal pairs returned by
+        # _groups_category_sql — never user or row data, so the f-string is safe.
+        # ty can't see that: it wants a LiteralString, which a dynamically-built
+        # (but still internally-fixed) query string can never satisfy.
+        cur.execute(
+            f"""
+            SELECT g.id, g.name, {select_cols}
+            FROM res_groups g
+            {join_sql}
+            WHERE g.id = ANY(%s)
+            """,  # noqa: S608  # ty: ignore[invalid-argument-type]
+            (list(all_gids),),
+        )
+        # Group names collide across categories (e.g. "Manager", "User" each
+        # appear in a dozen+ categories), so category must travel alongside
+        # name for any name-based matching downstream to be meaningful.
+        group_info = {
+            row[0]: {
+                "id": row[0],
+                "name": _localize(row[1]),
+                "privilege_id": row[2],
+                "privilege": _localize(row[3]) if row[3] else None,
+                "category_id": row[4],
+                "category": _localize(row[5]) if row[5] is not None else None,
+            }
+            for row in cur.fetchall()
+        }
+        for r in roles:
+            gids = {r["group_id"]} | closure.get(r["group_id"], set())
+            r["groups"] = sorted(
+                (group_info[gid] for gid in gids if gid in group_info),
+                key=lambda x: x["id"],
+            )
+
+    return roles
+
+
+def compute_role_drift(
+    roles: list[dict], groups: list[dict], user_ids: dict[str, int], include_sensitive: bool = False
+) -> list[dict]:
+    """Diff each user's assigned roles against their actual ``res.groups`` membership.
+
+    Pure function over the JSON shapes returned by ``get_roles(include_users=True,
+    include_groups=True)`` and ``get_groups(include_users=True)`` — kept separate
+    from ``get_role_drift`` so the diff logic is unit-testable without a cursor.
+
+    For every user who has at least one role, or who holds a group that is
+    some role's own marker group (see below), compares:
+
+    - ``expected`` = union of the resolved group sets of the user's currently
+      assigned roles (each role's ``groups`` already includes its transitive
+      ``implied_ids`` closure, see ``_trans_implied``) — this is what a
+      correctly-synced user with those roles should hold, implied groups
+      included.
+    - ``actual`` = groups the user is actually a member of.
+
+    ``missing_groups`` is ``expected - actual``: granted by a role the user
+    holds, but absent from their actual membership — typically a
+    ``base_user_role`` sync that never ran (broken cron, direct SQL write,
+    module upgrade).
+
+    ``extra_groups`` needs a narrower universe than "any group in some role's
+    resolved set": that set sweeps in near-universal baseline groups (e.g.
+    "Internal User") that virtually every role implies transitively and that
+    virtually every employee holds regardless of role, which would flag almost
+    the entire user base. Instead the universe is each role's own ``group_id``
+    (its exclusive marker group, *not* its implied closure) — the one thing
+    ``base_user_role`` actually writes/removes on ``res.users.groups_id``; Odoo
+    core cascades implied groups onto real membership rows on top of that.
+    ``extra_groups`` is then (``actual`` ∩ marker-group-ids) ``- expected``:
+    a role's marker the user physically holds, not covered even by the full
+    closure of roles they're currently assigned (so a role whose closure
+    legitimately implies another role's marker — e.g. an admin role implying
+    a cashier role's marker group — is correctly not flagged). What's left is
+    a role's marker present with no assigned-role explanation for it at all:
+    typically a role that was removed/expired without revoking its group, or
+    a group granted by hand bypassing the role framework.
+
+    Users with neither are omitted; the return list only carries drift.
+    Identity: keyed by ``user_id`` (from ``user_ids``, a ``login -> id``
+    lookup) rather than ``login`` (usually an email) by default — unlike
+    ``groups``/``roles``, this report is inherently per-user with no
+    ``--include-users``-style opt-out, so it needs its own gate. ``login``
+    is added alongside ``user_id`` only when ``include_sensitive=True``
+    (the global ``--include-sensitive-information`` switch), matching the
+    PII-redaction convention ``attachments`` already uses for filenames.
+    """
+    group_by_id = {group["id"]: group for group in groups}
+
+    user_actual_groups: dict[str, set[int]] = {}
+    for group in groups:
+        for login in group["users"]:
+            user_actual_groups.setdefault(login, set()).add(group["id"])
+
+    role_group_ids = {r["id"]: {group["id"] for group in r["groups"]} for r in roles}
+    marker_group_ids: set[int] = {r["group_id"] for r in roles}
+
+    user_role_ids: dict[str, set[int]] = {}
+    for r in roles:
+        for login in r["users"]:
+            user_role_ids.setdefault(login, set()).add(r["id"])
+
+    relevant_logins = set(user_role_ids) | {
+        login for login, gids in user_actual_groups.items() if gids & marker_group_ids
+    }
+
+    def _group_info(gid: int) -> dict:
+        group = group_by_id.get(gid)
+        return {"id": gid, "name": group["name"] if group else None, "category": group["category"] if group else None}
+
+    role_name_by_id = {r["id"]: r["name"] for r in roles}
+    drift: list[dict] = []
+    for login in sorted(relevant_logins):
+        rids = user_role_ids.get(login, set())
+        expected: set[int] = set()
+        for rid in rids:
+            expected |= role_group_ids.get(rid, set())
+        actual = user_actual_groups.get(login, set())
+
+        missing_ids = expected - actual
+        extra_ids = (actual & marker_group_ids) - expected
+        if not missing_ids and not extra_ids:
+            continue
+
+        entry: dict = {
+            "user_id": user_ids.get(login),
+            "roles": sorted(role_name_by_id[rid] for rid in rids),
+            "missing_groups": [_group_info(gid) for gid in sorted(missing_ids)],
+            "extra_groups": [_group_info(gid) for gid in sorted(extra_ids)],
+        }
+        if include_sensitive:
+            entry["login"] = login
+        drift.append(entry)
+
+    return drift
+
+
+def get_role_drift(cur: psycopg.Cursor, include_sensitive: bool = False) -> list[dict] | None:
+    """Detect drift between assigned ``res.users.role`` and actual ``res.groups`` membership.
+
+    ``None`` if ``base_user_role`` isn't installed (same pattern as
+    ``get_roles``/``get_jobs``). See ``compute_role_drift`` for the diff rules
+    and the ``include_sensitive`` login-vs-user_id gate.
+    """
+    roles = get_roles(cur, include_users=True, include_groups=True)
+    if roles is None:
+        return None
+    # include_acls defaults to False, so this is always list[dict] — ty can't
+    # narrow that from a plain bool default without an @overload per call site.
+    groups = get_groups(cur, include_users=True)
+    cur.execute("SELECT login, id FROM res_users")
+    user_ids = dict(cur.fetchall())
+    return compute_role_drift(roles, groups, user_ids, include_sensitive=include_sensitive)  # ty: ignore[invalid-argument-type]
+
+
 def get_stats(
     cur: psycopg.Cursor,
     years: int = 3,

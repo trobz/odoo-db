@@ -45,6 +45,9 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `jobs <db>` | Queue job counts by state (requires `queue_job` module) |
 | `params <db> [pattern]` | Show `ir_config_parameter` keys and values. Optional `pattern` narrows to keys containing it (case-insensitive substring). Values of secret-bearing keys are masked `********` by default; the global `--include-sensitive-information` reveals them |
 | `users <db>` | List active users with connection status |
+| `groups <db>` | List `res.groups` (category, name, share flag). `--include-users` adds each group's member logins. `--include-acls` adds per-group model access rights and record rules, plus top-level `global_acls`/`global_rules` for rows with no group at all (apply to every user — excluded from prior output, now the highest-value rows in a permission audit) |
+| `roles <db>` | List `res.users.role` (requires OCA `base_user_role`; prints a message if not installed). `--include-users` adds currently-enabled assigned users' logins. `--include-groups` adds the role's full resolved group set (its own group plus all directly and transitively implied groups) |
+| `role-drift <db>` | Detect drift between assigned `res.users.role` and actual `res.groups` membership (requires OCA `base_user_role`). Reports `missing_groups` (role grants a group the user doesn't actually have — sync gap) and `extra_groups` (user physically holds a role's own marker group but no role assignment — active or via another assigned role's implied closure — explains it: stale privilege from a removed/expired role, or a group granted by hand), per user. Baseline groups implied by roles but not exclusive to any of them (e.g. "Internal User") never count as drift. Each user is keyed by `user_id`; `login` (PII) is included only with the global `--include-sensitive-information` flag. `--output-format prometheus` exposes a `odoo_db_role_drift_users` gauge for alerting |
 | `locks <db>` | Show active PostgreSQL locks |
 | `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`). Tables with 0-byte heap are reported as empty without running `count(*)` |
 | `bloat <db>` | Estimate table + index bloat — space reclaimable by `VACUUM FULL` / `REINDEX` / a dump+restore migration (autovacuum never returns it). Uses `pgstattuple` for exact figures when the extension is installed and the relation fits under `--exact-max-scan` (MB), else a cheap statistical estimate; each row is tagged `exact`/`est`. Also flags high dead-tuple ratios, stale autovacuum, and unused indexes (`idx_scan = 0`) |
@@ -82,6 +85,12 @@ odoo-db params my_db mail
 
 # Reveal masked secret values (database.secret, api keys, ...)
 odoo-db --include-sensitive-information params my_db
+
+# List access groups, with members and ACLs
+odoo-db groups my_db --include-users --include-acls
+
+# List user roles (base_user_role), with resolved group sets
+odoo-db --output-format json roles my_db --include-users --include-groups
 
 # Per-table stats: record counts and sizes for last 3 years
 odoo-db stats my_db

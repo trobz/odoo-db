@@ -50,6 +50,86 @@ the Typer app, exhaustive, always current. Read that file (or run
 Non-obvious behavior worth keeping in agent context (the bits a `--help`
 dump won't tell you):
 
+- `groups`/`roles`: `res.groups.name`/`comment` and `ir.module.category.name`
+  are `translate=True` — Odoo 16+ stores them as jsonb (`{"en_US": "...",
+  ...}`) since `ir.translation` was dropped for model fields that version;
+  older versions store plain text. `db._localize()` normalizes both
+  (picks `en_US`, falls back to any available translation). `roles` reads
+  `res.users.role` (OCA `base_user_role`); the table `res_users_role`
+  delegates (`_inherits`) to `res.groups` via `group_id` — name/category live
+  on the joined `res_groups` row, not on `res_users_role` itself. Returns
+  `None` (command prints a message) if `base_user_role` isn't installed, same
+  pattern as `jobs`/`queue_job`. `--include-groups` resolves each role's full
+  granted-group set (`{group_id} | trans_implied(group_id)`) via
+  `db._trans_implied()`, a recursive CTE over `res_groups_implied_rel`
+  (`(gid, hid)` = "group `gid` implies group `hid`") — `trans_implied_ids` is
+  compute-only on the Odoo side, not a column, so there's no shortcut query.
+  Odoo 19 dropped `res_groups.category_id`; the category is now reached via
+  `res_groups.privilege_id` -> `res_groups_privilege.category_id` ->
+  `ir_module_category`. `db._groups_category_sql(cur)` probes
+  `information_schema.columns` for `privilege_id` once per `get_groups`/
+  `get_roles` call and returns the right `(select_cols, join_sql)` pair for
+  either schema — both branches select the same 4 columns (privilege id/name,
+  category id/name) so row-unpacking stays single-path; `privilege`/
+  `privilege_id` are simply `None` pre-19. `category` still maps to
+  `ir_module_category` on both versions so the JSON stays comparable across a
+  v16 -> v19 migration audit. Verified against two live v18 databases
+  (`odoo_db`, `v18c_pos_container_deposit`) — no v14/v16/v19 database was
+  available to verify those branches directly.
+- `groups --include-acls` returns a plain `list[dict]` when `include_acls` is
+  unset (the default `get_groups()` shape everything else relies on, e.g.
+  `role-drift`'s `get_groups(include_users=True)`), but with
+  `include_acls=True` returns `{"groups": [...], "global_acls": [...],
+  "global_rules": [...]}` instead — two `@overload` signatures on
+  `db.get_groups()` express this so callers get the right static type back.
+  An `ir_model_access` row with `group_id IS NULL`, or an `ir_rule` with no
+  linked group at all (`ir_rule.global = true`), grants/restricts *every*
+  user — previously silently dropped (`WHERE group_id IS NOT NULL` / an INNER
+  JOIN through `rule_group_rel` that only matches group-linked rules), which
+  hid the highest-value rows in a permission audit: a model readable by
+  everyone looked unreachable in the report. They can't be attributed to a
+  single group's `acls`, hence top-level siblings instead of duplicating them
+  into every group. Both queries also now filter `active = true`
+  (`ima.active`, `r.active`) — archived acls/rules were previously reported
+  as if still in force. Verified end-to-end against `odoo_db`: 7 global acls
+  + 10 global rules surfaced that the old query silently dropped.
+- `role-drift` diffs each user's assigned roles (`get_roles(include_users=True,
+  include_groups=True)`) against their actual group membership
+  (`get_groups(include_users=True)`) via `db.compute_role_drift()`, a pure
+  function over those two JSON shapes (unit-tested without a cursor —
+  see `tests/test_smoke.py::test_compute_role_drift`). `expected` = union of
+  the resolved (implied-closure-included) group sets of the user's *currently
+  assigned* roles; `missing_groups` = `expected - actual` (role grants it,
+  user doesn't actually have it — `base_user_role` sync gap: broken cron,
+  direct SQL write, module upgrade). `extra_groups` deliberately does *not*
+  use "any group in some role's resolved set" as its universe — that sweeps
+  in near-universal implied baseline groups (e.g. "Internal User") that
+  almost every role transitively implies and almost every employee holds
+  regardless of role, flagging nearly the whole user base as verified against
+  real data (`lalouve_staging`: ~90 of ~120 users). Instead the universe is
+  each role's own `group_id` (its exclusive marker group, not its implied
+  closure) — the one thing `base_user_role` actually writes/removes on
+  `groups_id`, since Odoo core cascades implied groups onto real membership
+  on top of that. `extra_groups` = (`actual` ∩ marker-group-ids) `-
+  expected` — note: subtracted against the *full* closure `expected`, not
+  just the user's own marker ids, so a role whose closure legitimately
+  implies another role's marker (e.g. an admin role implying a cashier role's
+  marker) is correctly not flagged. Verified against `lalouve_staging` this
+  way: 24 of ~120 users flagged, all either seed/demo accounts named after a
+  role (`cashier@example.com` holding the `Cashier` marker with no role line)
+  or real users holding a marker with no active `res_users_role_line` for
+  it — zero false positives from implied-baseline noise. Users with neither
+  kind of drift are omitted. Returns `None` if `base_user_role` isn't
+  installed, same pattern as `roles`. `--output-format prometheus` exposes
+  `odoo_db_role_drift_users` (count of users with drift) for alerting.
+  Unlike `groups`/`roles` (which gate exposing logins behind their own
+  `--include-users` flag), `role-drift` is inherently per-user with no
+  such opt-out, so each entry is keyed by `user_id` (from a `login -> id`
+  lookup built in `get_role_drift`, passed into `compute_role_drift` as
+  `user_ids`) rather than `login` by default; `login` is added alongside
+  `user_id` only when the global `--include-sensitive-information` flag is
+  set, threaded through as `compute_role_drift(..., include_sensitive=...)`
+  — same PII-redaction convention `attachments` uses for filenames.
 - `prepare-audit` writes `<db>.json` to the current working directory.
   `model_owners` is derived from `ir_model_data` + `ir_model_relation`
   (authoritative, not heuristic). `orphan_tables` carries a `reason`:

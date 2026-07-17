@@ -38,6 +38,9 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `params`: Show ir_config_parameter keys and values...
 * `jobs`: List queue job counts by state for a...
 * `users`: List active users for a database.
+* `groups`: List res.groups for a database.
+* `roles`: List res.users.role (OCA base_user_role)...
+* `role-drift`: Detect drift between assigned...
 * `locks`: Show active database locks for a database.
 * `stats`: Show per-table record counts and sizes for...
 * `bloat`: Estimate table + index bloat (reclaimable...
@@ -152,6 +155,64 @@ List active users for a database.
 
 ```console
 $ odoo-db users [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+## `odoo-db groups`
+
+List res.groups for a database.
+
+**Usage**:
+
+```console
+$ odoo-db groups [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
+* `--include-users`: Include group members&#x27; logins.
+* `--include-acls`: Include model access rights and record rules per group.
+* `--help`: Show this message and exit.
+
+## `odoo-db roles`
+
+List res.users.role (OCA base_user_role) for a database.
+
+**Usage**:
+
+```console
+$ odoo-db roles [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
+* `--include-users`: Include assigned users&#x27; logins.
+* `--include-groups`: Include the role&#x27;s full resolved group set.
+* `--help`: Show this message and exit.
+
+## `odoo-db role-drift`
+
+Detect drift between assigned res.users.role and actual res.groups membership.
+
+**Usage**:
+
+```console
+$ odoo-db role-drift [OPTIONS] DB
 ```
 
 **Arguments**:
