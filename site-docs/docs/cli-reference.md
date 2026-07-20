@@ -94,6 +94,7 @@ $ odoo-db crons [OPTIONS] DB
 **Options**:
 
 * `--running`: List crons currently running (RowShareLock on ir_cron).
+* `--include-code`: Show the python source of each cron&#x27;s server action, if any (populated only for state=&#x27;code&#x27; actions).
 * `--help`: Show this message and exit.
 
 ## `odoo-db jobs`
