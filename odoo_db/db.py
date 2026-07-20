@@ -287,7 +287,7 @@ def get_running_crons(cur: psycopg.Cursor) -> list[dict]:
             a.pid,
             ic.id AS cron_id,
             ic.cron_name,
-            ias.model_name,
+            im.model,
             ias.code,
             a.state,
             a.query_start,
@@ -299,6 +299,7 @@ def get_running_crons(cur: psycopg.Cursor) -> list[dict]:
         JOIN pg_stat_activity a ON a.pid = l.pid
         LEFT JOIN ir_cron ic ON ic.xmax = a.backend_xid
         LEFT JOIN ir_act_server ias ON ias.id = ic.ir_actions_server_id
+        LEFT JOIN ir_model im ON im.id = ias.model_id
         WHERE c.relname = 'ir_cron' AND l.mode = 'RowShareLock'
     """)
     results: list[dict] = []
