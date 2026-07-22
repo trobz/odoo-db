@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.14.1 (2026-07-22)
+
+### Bug Fixes
+
+- **crons**: Resolve model name via ir_model join instead of ias.model_name
+  ([`3253636`](https://github.com/trobz/odoo-db/commit/3253636c225aaa8986324fbeffe1a76ee25404b2))
+
+
 ## v1.14.0 (2026-06-19)
 
 ### Features
