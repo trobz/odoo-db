@@ -186,10 +186,19 @@ def crons(
     running: Annotated[
         bool, typer.Option("--running", help="List crons currently running (RowShareLock on ir_cron).")
     ] = False,
+    include_code: Annotated[
+        bool,
+        typer.Option(
+            "--include-code",
+            help=(
+                "Show the python source of each cron's server action, if any (populated only for state='code' actions)."
+            ),
+        ),
+    ] = False,
 ):
     """List active scheduled actions for a database."""
     with _handle_errors(db_name), db.cursor(db_name) as cur:
-        rows_data = db.get_running_crons(cur) if running else db.get_crons(cur)
+        rows_data = db.get_running_crons(cur) if running else db.get_crons(cur, include_code=include_code)
 
     with _writer() as w:
         if running:
@@ -230,8 +239,11 @@ def crons(
             w.prometheus(lines)
         else:
             w.table(
-                ["name", "interval", "nextcall"],
-                [[r["name"], r["interval"], r["nextcall"]] for r in rows_data],
+                ["name", "interval", "nextcall"] + (["code"] if include_code else []),
+                [
+                    [r["name"], r["interval"], r["nextcall"]] + ([r.get("code") or ""] if include_code else [])
+                    for r in rows_data
+                ],
             )
 
 

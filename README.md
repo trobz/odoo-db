@@ -41,7 +41,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 |---------|-------------|
 | `list` | List all Odoo DBs with version and neutralization status |
 | `modules <db>` | List installed modules with version |
-| `crons <db>` | List active scheduled actions. `--running` shows crons currently held by an Odoo worker (RowShareLock on `ir_cron`) — transient debug data, not bundled into `prepare-audit` |
+| `crons <db>` | List active scheduled actions. `--running` shows crons currently held by an Odoo worker (RowShareLock on `ir_cron`) — transient debug data, not bundled into `prepare-audit`. `--include-code` adds the python source of each `state='code'` cron (ignored with `--running`, which already always shows it) |
 | `jobs <db>` | Queue job counts by state (requires `queue_job` module) |
 | `users <db>` | List active users with connection status |
 | `locks <db>` | Show active PostgreSQL locks |

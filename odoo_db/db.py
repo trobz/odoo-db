@@ -256,18 +256,20 @@ def get_model_owners(cur: psycopg.Cursor) -> dict[str, str]:
     return owners
 
 
-def get_crons(cur: psycopg.Cursor) -> list[dict]:
+def get_crons(cur: psycopg.Cursor, *, include_code: bool = False) -> list[dict]:
     cur.execute("""
-            SELECT cron_name, interval_number, interval_type, nextcall
-            FROM ir_cron
-            WHERE active = true
-            ORDER BY nextcall
+            SELECT ic.cron_name, ic.interval_number, ic.interval_type, ic.nextcall, ias.code
+            FROM ir_cron ic
+            LEFT JOIN ir_act_server ias ON ias.id = ic.ir_actions_server_id
+            WHERE ic.active = true
+            ORDER BY ic.nextcall
         """)
     return [
         {
             "name": row[0],
             "interval": f"{row[1]} {row[2]}",
             "nextcall": str(row[3]),
+            **({"code": (row[4] or "").strip() or None} if include_code else {}),
         }
         for row in cur.fetchall()
     ]

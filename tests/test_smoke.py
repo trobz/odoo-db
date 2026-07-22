@@ -45,6 +45,14 @@ def test_attachments_help():
     assert result.exit_code == 0
 
 
+def test_crons_help():
+    # TERM=dumb: Rich auto-enables ANSI styling in CI (detects GITHUB_ACTIONS),
+    # which splits "--include-code" with escape codes and breaks the substring check.
+    result = runner.invoke(app, ["crons", "--help"], env={"TERM": "dumb"})
+    assert result.exit_code == 0
+    assert "--include-code" in result.output
+
+
 def test_global_sensitive_flag_exists():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
