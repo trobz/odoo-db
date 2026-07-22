@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.15.0 (2026-07-22)
+
+### Features
+
+- **crons**: Add --include-code flag
+  ([`5dcd8a9`](https://github.com/trobz/odoo-db/commit/5dcd8a9156ae76c8730a516daf7a8c463a85f1c1))
+
+
 ## v1.14.1 (2026-07-22)
 
 ### Bug Fixes
