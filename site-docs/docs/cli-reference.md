@@ -20,6 +20,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 
 **Options**:
 
+* `-V, --version`: Display the odoo-db version.
 * `--output-file TEXT`: \[default: -\]
 * `--output-format TEXT`: \[default: text\]
 * `--log-level TEXT`: \[default: WARNING\]
@@ -33,7 +34,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 
 * `list`: List all Odoo databases: name, version,...
 * `modules`: List installed modules with version for a...
-* `crons`: List active scheduled actions for a database.
+* `crons`: List scheduled actions for a database.
 * `jobs`: List queue job counts by state for a...
 * `users`: List active users for a database.
 * `locks`: Show active database locks for a database.
@@ -79,7 +80,7 @@ $ odoo-db modules [OPTIONS] DB
 
 ## `odoo-db crons`
 
-List active scheduled actions for a database.
+List scheduled actions for a database.
 
 **Usage**:
 
@@ -95,6 +96,7 @@ $ odoo-db crons [OPTIONS] DB
 
 * `--running`: List crons currently running (RowShareLock on ir_cron).
 * `--include-code`: Show the python source of each cron&#x27;s server action, if any (populated only for state=&#x27;code&#x27; actions).
+* `--all`: Also include inactive crons, adding an &#x27;active&#x27; column (ignored with --running).
 * `--help`: Show this message and exit.
 
 ## `odoo-db jobs`
