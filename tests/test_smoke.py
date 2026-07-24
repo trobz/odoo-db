@@ -1,6 +1,6 @@
 from typer.testing import CliRunner
 
-from odoo_db.db import _bloat_estimate_pages, _mime_family, _validate_attachment_orphans
+from odoo_db.db import _bloat_estimate_pages, _mime_family, _validate_attachment_orphans, get_config_parameters
 from odoo_db.main import app
 
 runner = CliRunner()
@@ -57,6 +57,50 @@ def test_crons_help():
 def test_global_sensitive_flag_exists():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
+
+
+class _FakeParamsCursor:
+    def __init__(self, rows):
+        self._rows = rows
+        self.query: str | None = None
+        self.params = None
+
+    def execute(self, query, params=None):
+        self.query = query
+        self.params = params
+
+    def fetchall(self):
+        return self._rows
+
+
+def test_get_config_parameters_with_pattern():
+    cur = _FakeParamsCursor([("mail.catchall.domain", "example.com")])
+    result = get_config_parameters(cur, pattern="mail")  # ty: ignore[invalid-argument-type]
+
+    assert result == [{"key": "mail.catchall.domain", "value": "example.com"}]
+    assert cur.params is None
+
+
+def test_get_config_parameters_masks_secrets_by_default():
+    cur = _FakeParamsCursor([
+        ("database.secret", "a1b9f3e2c8d4"),
+        ("web.base.url", "http://localhost:8069"),
+        ("google.client_secret", "GOCSPX-xxxx"),
+    ])
+    result = get_config_parameters(cur)  # ty: ignore[invalid-argument-type]
+
+    assert result == [
+        {"key": "database.secret", "value": "********"},
+        {"key": "web.base.url", "value": "http://localhost:8069"},
+        {"key": "google.client_secret", "value": "********"},
+    ]
+
+
+def test_get_config_parameters_reveals_secrets_when_asked():
+    cur = _FakeParamsCursor([("database.secret", "a1b9f3e2c8d4")])
+    result = get_config_parameters(cur, reveal=True)  # ty: ignore[invalid-argument-type]
+
+    assert result == [{"key": "database.secret", "value": "a1b9f3e2c8d4"}]
 
 
 class _FakeCursor:

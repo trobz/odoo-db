@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -254,6 +255,45 @@ def get_model_owners(cur: psycopg.Cursor) -> dict[str, str]:
         owners.setdefault(tablename, module)
 
     return owners
+
+
+# Substring markers (case-insensitive) flagging an ir_config_parameter key whose
+# value is a secret (session HMAC, oauth secret, api key, ...). Value is masked
+# unless the caller passes reveal=True (global --include-sensitive-information).
+_SENSITIVE_KEY_MARKERS = (
+    "secret",
+    "password",
+    "passwd",
+    "token",
+    "api_key",
+    "apikey",
+    "private_key",
+    "client_secret",
+    "enterprise_code",
+    "dsn",
+)
+_SECRET_MASK = "********"  # noqa: S105 — mask placeholder, not a real secret
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    if re.search(r"(^|[._])key$", lowered):
+        return True
+    return any(marker in lowered for marker in _SENSITIVE_KEY_MARKERS)
+
+
+def get_config_parameters(cur: psycopg.Cursor, *, pattern: str | None = None, reveal: bool = False) -> list[dict]:
+    cur.execute("SELECT key, value FROM ir_config_parameter ORDER BY key")
+    needle = pattern.lower() if pattern else None
+
+    rows = []
+    for key, value in cur.fetchall():
+        if needle and needle not in key.lower():
+            continue
+        if not reveal and _is_sensitive_key(key):
+            value = _SECRET_MASK
+        rows.append({"key": key, "value": value})
+    return rows
 
 
 def get_crons(cur: psycopg.Cursor, *, include_code: bool = False, include_inactive: bool = False) -> list[dict]:

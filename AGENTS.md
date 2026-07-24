@@ -82,6 +82,14 @@ dump won't tell you):
   `odoo_db/db.py` under `_RECOGNIZED_FUNCTIONS` / `_RECOGNIZED_TRIGGERS`.
 - `crons --running` is transient debug data, intentionally excluded from
   `prepare-audit`. `crons --all` additionally lists inactive crons.
+- `params` prints `ir_config_parameter` key/value pairs; it's a local debug
+  tool, not part of `prepare-audit`. Optional `[PATTERN]` arg does a
+  case-insensitive substring match on `key` (`ILIKE '%pattern%'`). Values of
+  secret-bearing keys are **masked** (`********`) by default — keys always show.
+  A key is sensitive if it contains any `_SENSITIVE_KEY_MARKERS` substring
+  (`secret`, `password`, `token`, `api_key`, `dsn`, ...) in `odoo_db/db.py`.
+  The global `--include-sensitive-information` reveals values (no per-command
+  flag). Masking applies to `text` and `json`; `prometheus` emits only a count.
 - `attachments` audits `ir.attachment` storage in pure SQL — no ORM, so it
   sees field-backed rows (`image_1920`, logos, signatures) natively. The ORM's
   `_search` auto-injects `res_field = False` and hides them; raw SQL has no

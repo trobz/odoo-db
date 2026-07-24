@@ -35,6 +35,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `list`: List all Odoo databases: name, version,...
 * `modules`: List installed modules with version for a...
 * `crons`: List scheduled actions for a database.
+* `params`: Show ir_config_parameter keys and values...
 * `jobs`: List queue job counts by state for a...
 * `users`: List active users for a database.
 * `locks`: Show active database locks for a database.
@@ -97,6 +98,32 @@ $ odoo-db crons [OPTIONS] DB
 * `--running`: List crons currently running (RowShareLock on ir_cron).
 * `--include-code`: Show the python source of each cron&#x27;s server action, if any (populated only for state=&#x27;code&#x27; actions).
 * `--all`: Also include inactive crons, adding an &#x27;active&#x27; column (ignored with --running).
+* `--help`: Show this message and exit.
+
+## `odoo-db params`
+
+Show ir_config_parameter keys and values for a database.
+
+Values of secret-bearing keys (database.secret, *.client_secret, *.api_key,
+tokens, ...) are masked as ******** by default; pass the global
+--include-sensitive-information to reveal them. Keys are always shown.
+
+Masking is best-effort by key name and not exhaustive — verify output
+before sharing.
+
+**Usage**:
+
+```console
+$ odoo-db params [OPTIONS] DB [PATTERN]
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+* `[PATTERN]`: Case-insensitive substring match on key.
+
+**Options**:
+
 * `--help`: Show this message and exit.
 
 ## `odoo-db jobs`

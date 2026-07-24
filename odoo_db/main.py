@@ -268,6 +268,49 @@ def crons(
 
 
 # ---------------------------------------------------------------------------
+# params
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def params(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    pattern: Annotated[
+        str | None,
+        typer.Argument(metavar="[PATTERN]", help="Case-insensitive substring match on key."),
+    ] = None,
+):
+    """Show ir_config_parameter keys and values for a database.
+
+    Values of secret-bearing keys (database.secret, *.client_secret, *.api_key,
+    tokens, ...) are masked as ******** by default; pass the global
+    --include-sensitive-information to reveal them. Keys are always shown.
+
+    Masking is best-effort by key name and not exhaustive — verify output
+    before sharing.
+    """
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        rows_data = db.get_config_parameters(cur, pattern=pattern, reveal=_include_sensitive)
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(rows_data)
+        elif w.fmt == "prometheus":
+            lines = [
+                "# HELP odoo_db_config_parameters Config parameter count",
+                "# TYPE odoo_db_config_parameters gauge",
+                f'odoo_db_config_parameters{{db="{db_name}"}} {len(rows_data)}',
+            ]
+            w.prometheus(lines)
+        else:
+            w.table(
+                ["key", "value"],
+                [[r["key"], r["value"] or ""] for r in rows_data],
+                empty_msg="No parameters found.",
+            )
+
+
+# ---------------------------------------------------------------------------
 # jobs
 # ---------------------------------------------------------------------------
 
