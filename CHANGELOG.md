@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.17.0 (2026-07-24)
+
+### Features
+
+- **params**: Add ir_config_parameter key/value dump command
+  ([`4a08d2a`](https://github.com/trobz/odoo-db/commit/4a08d2adf144a0392451e01219e9b780a7357543))
+
+
 ## v1.16.0 (2026-07-24)
 
 ### Features
