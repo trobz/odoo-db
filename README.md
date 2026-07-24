@@ -43,6 +43,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `modules <db>` | List installed modules with version |
 | `crons <db>` | List active scheduled actions (`--all` also includes inactive ones). `--running` shows crons currently held by an Odoo worker (RowShareLock on `ir_cron`) — transient debug data, not bundled into `prepare-audit`. `--include-code` adds the python source of each `state='code'` cron (ignored with `--running`, which already always shows it) |
 | `jobs <db>` | Queue job counts by state (requires `queue_job` module) |
+| `params <db> [pattern]` | Show `ir_config_parameter` keys and values. Optional `pattern` narrows to keys containing it (case-insensitive substring). Values of secret-bearing keys are masked `********` by default; the global `--include-sensitive-information` reveals them |
 | `users <db>` | List active users with connection status |
 | `locks <db>` | Show active PostgreSQL locks |
 | `stats <db>` | Per-table record counts and sizes by year (`--years N`, `--top N`). Tables with 0-byte heap are reported as empty without running `count(*)` |
@@ -72,6 +73,15 @@ odoo-db modules my_db
 
 # Show queue jobs
 odoo-db jobs my_db
+
+# Show all config parameters
+odoo-db params my_db
+
+# Show config parameters with "mail" in the key
+odoo-db params my_db mail
+
+# Reveal masked secret values (database.secret, api keys, ...)
+odoo-db --include-sensitive-information params my_db
 
 # Per-table stats: record counts and sizes for last 3 years
 odoo-db stats my_db
