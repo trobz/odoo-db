@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.16.0 (2026-07-24)
+
+### Features
+
+- **crons**: Add --all flag to include inactive crons
+  ([`beb9843`](https://github.com/trobz/odoo-db/commit/beb9843d4fbcb44bc090c9c71a166dce6708a984))
+
+
 ## v1.15.0 (2026-07-22)
 
 ### Features
