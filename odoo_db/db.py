@@ -256,20 +256,24 @@ def get_model_owners(cur: psycopg.Cursor) -> dict[str, str]:
     return owners
 
 
-def get_crons(cur: psycopg.Cursor, *, include_code: bool = False) -> list[dict]:
-    cur.execute("""
-            SELECT ic.cron_name, ic.interval_number, ic.interval_type, ic.nextcall, ias.code
+def get_crons(cur: psycopg.Cursor, *, include_code: bool = False, include_inactive: bool = False) -> list[dict]:
+    where_clause = sql.SQL("") if include_inactive else sql.SQL("WHERE ic.active = true")
+    cur.execute(
+        sql.SQL("""
+            SELECT ic.cron_name, ic.interval_number, ic.interval_type, ic.nextcall, ias.code, ic.active
             FROM ir_cron ic
             LEFT JOIN ir_act_server ias ON ias.id = ic.ir_actions_server_id
-            WHERE ic.active = true
+            {where}
             ORDER BY ic.nextcall
-        """)
+        """).format(where=where_clause)
+    )
     return [
         {
             "name": row[0],
             "interval": f"{row[1]} {row[2]}",
             "nextcall": str(row[3]),
             **({"code": (row[4] or "").strip() or None} if include_code else {}),
+            **({"active": row[5]} if include_inactive else {}),
         }
         for row in cur.fetchall()
     ]

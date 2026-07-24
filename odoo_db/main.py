@@ -195,10 +195,21 @@ def crons(
             ),
         ),
     ] = False,
+    include_inactive: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Also include inactive crons, adding an 'active' column (ignored with --running).",
+        ),
+    ] = False,
 ):
-    """List active scheduled actions for a database."""
+    """List scheduled actions for a database."""
     with _handle_errors(db_name), db.cursor(db_name) as cur:
-        rows_data = db.get_running_crons(cur) if running else db.get_crons(cur, include_code=include_code)
+        rows_data = (
+            db.get_running_crons(cur)
+            if running
+            else db.get_crons(cur, include_code=include_code, include_inactive=include_inactive)
+        )
 
     with _writer() as w:
         if running:
@@ -231,20 +242,29 @@ def crons(
         if w.fmt == "json":
             w.json(rows_data)
         elif w.fmt == "prometheus":
+            active_count = sum(1 for r in rows_data if r.get("active", True)) if include_inactive else len(rows_data)
             lines = [
                 "# HELP odoo_db_crons_active Active scheduled action count",
                 "# TYPE odoo_db_crons_active gauge",
-                f'odoo_db_crons_active{{db="{db_name}"}} {len(rows_data)}',
+                f'odoo_db_crons_active{{db="{db_name}"}} {active_count}',
             ]
             w.prometheus(lines)
         else:
-            w.table(
-                ["name", "interval", "nextcall"] + (["code"] if include_code else []),
-                [
-                    [r["name"], r["interval"], r["nextcall"]] + ([r.get("code") or ""] if include_code else [])
-                    for r in rows_data
-                ],
-            )
+            header = ["name", "interval", "nextcall"]
+            if include_code:
+                header.append("code")
+            if include_inactive:
+                header.append("active")
+
+            def row_cells(r: dict) -> list[str]:
+                cells = [r["name"], r["interval"], r["nextcall"]]
+                if include_code:
+                    cells.append(r.get("code") or "")
+                if include_inactive:
+                    cells.append(str(r.get("active")))
+                return cells
+
+            w.table(header, [row_cells(r) for r in rows_data])
 
 
 # ---------------------------------------------------------------------------

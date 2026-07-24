@@ -81,7 +81,7 @@ dump won't tell you):
   `unaccent`, `queue_job_notify`) or `custom`. The allowlist lives in
   `odoo_db/db.py` under `_RECOGNIZED_FUNCTIONS` / `_RECOGNIZED_TRIGGERS`.
 - `crons --running` is transient debug data, intentionally excluded from
-  `prepare-audit`.
+  `prepare-audit`. `crons --all` additionally lists inactive crons.
 - `attachments` audits `ir.attachment` storage in pure SQL — no ORM, so it
   sees field-backed rows (`image_1920`, logos, signatures) natively. The ORM's
   `_search` auto-injects `res_field = False` and hides them; raw SQL has no

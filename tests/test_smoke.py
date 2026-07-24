@@ -51,6 +51,7 @@ def test_crons_help():
     result = runner.invoke(app, ["crons", "--help"], env={"TERM": "dumb"})
     assert result.exit_code == 0
     assert "--include-code" in result.output
+    assert "--all" in result.output
 
 
 def test_global_sensitive_flag_exists():
