@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.18.0 (2026-07-27)
+
+### Features
+
+- Add groups, roles, and role-drift commands
+  ([`0abb903`](https://github.com/trobz/odoo-db/commit/0abb9035b117bd9c418c273a0020c101c15efa36))
+
+
 ## v1.17.0 (2026-07-24)
 
 ### Features
