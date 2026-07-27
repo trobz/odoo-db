@@ -376,6 +376,202 @@ def users(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 
 
 # ---------------------------------------------------------------------------
+# groups
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def groups(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    include_users: Annotated[bool, typer.Option("--include-users", help="Include group members' logins.")] = False,
+    include_acls: Annotated[
+        bool, typer.Option("--include-acls", help="Include model access rights and record rules per group.")
+    ] = False,
+):
+    """List res.groups for a database."""
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        result = db.get_groups(cur, include_users=include_users, include_acls=include_acls)
+
+    # With --include-acls, get_groups returns {"groups", "global_acls", "global_rules"}
+    # instead of a plain list — acl/rule rows with no group apply to everyone and can't
+    # be attributed to a single group's per-row acls.
+    if isinstance(result, dict):
+        rows_data = result["groups"]
+        global_acls = result["global_acls"]
+        global_rules = result["global_rules"]
+    else:
+        rows_data = result
+        global_acls = []
+        global_rules = []
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(result)
+        elif w.fmt == "prometheus":
+            lines = [
+                "# HELP odoo_db_groups Access group count",
+                "# TYPE odoo_db_groups gauge",
+                f'odoo_db_groups{{db="{db_name}"}} {len(rows_data)}',
+            ]
+            if include_acls:
+                lines += [
+                    "# HELP odoo_db_groups_global_acls Model access rules granted to every user (no group)",
+                    "# TYPE odoo_db_groups_global_acls gauge",
+                    f'odoo_db_groups_global_acls{{db="{db_name}"}} {len(global_acls)}',
+                    "# HELP odoo_db_groups_global_rules Record rules applied to every user (no group)",
+                    "# TYPE odoo_db_groups_global_rules gauge",
+                    f'odoo_db_groups_global_rules{{db="{db_name}"}} {len(global_rules)}',
+                ]
+            w.prometheus(lines)
+        else:
+            headers = ["id", "category", "name", "share"]
+            if include_users:
+                headers.append("users")
+            if include_acls:
+                # Two columns, not a summed total: model access rights (ir.model.access,
+                # grants) and record rules (ir.rule, restricts) have opposite security
+                # meaning, and collapsing them hides which one a given count refers to.
+                # "(group)" flags these as per-group only - global_acls/global_rules
+                # (rows with no group at all) are reported separately, see the summary
+                # line below the table.
+                headers += ["access (group)", "rules (group)"]
+            rows = []
+            for r in rows_data:
+                row = [str(r["id"]), r["category"] or "", r["name"], "yes" if r["share"] else "no"]
+                if include_users:
+                    row.append(str(len(r["users"])))
+                if include_acls:
+                    row += [str(len(r["acls"]["model_access"])), str(len(r["acls"]["rules"]))]
+                rows.append(row)
+            w.table(headers, rows)
+            if include_acls and (global_acls or global_rules):
+                w.text(
+                    f"\nGlobal (no group — applies to every user): "
+                    f"{len(global_acls)} model access right(s), {len(global_rules)} record rule(s)."
+                )
+
+
+# ---------------------------------------------------------------------------
+# roles
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def roles(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    include_users: Annotated[bool, typer.Option("--include-users", help="Include assigned users' logins.")] = False,
+    include_groups: Annotated[
+        bool, typer.Option("--include-groups", help="Include the role's full resolved group set.")
+    ] = False,
+):
+    """List res.users.role (OCA base_user_role) for a database."""
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        rows_data = db.get_roles(cur, include_users=include_users, include_groups=include_groups)
+
+    with _writer() as w:
+        if rows_data is None:
+            # json/prometheus consumers need valid output, not the human message —
+            # the message still goes to stderr so an interactive run explains why.
+            if w.fmt == "json":
+                w.json([])
+                typer.echo("base_user_role module not installed.", err=True)
+            elif w.fmt == "prometheus":
+                w.prometheus([
+                    "# HELP odoo_db_roles_module_installed Whether the base_user_role module is installed",
+                    "# TYPE odoo_db_roles_module_installed gauge",
+                    f'odoo_db_roles_module_installed{{db="{db_name}"}} 0',
+                ])
+                typer.echo("base_user_role module not installed.", err=True)
+            else:
+                w.text("base_user_role module not installed.")
+            return
+
+        if w.fmt == "json":
+            w.json(rows_data)
+        elif w.fmt == "prometheus":
+            lines = [
+                "# HELP odoo_db_roles User role count",
+                "# TYPE odoo_db_roles gauge",
+                f'odoo_db_roles{{db="{db_name}"}} {len(rows_data)}',
+            ]
+            w.prometheus(lines)
+        else:
+            headers = ["id", "category", "name"]
+            if include_users:
+                headers.append("users")
+            if include_groups:
+                headers.append("groups")
+            rows = []
+            for r in rows_data:
+                row = [str(r["id"]), r["category"] or "", r["name"]]
+                if include_users:
+                    row.append(str(len(r["users"])))
+                if include_groups:
+                    row.append(str(len(r["groups"])))
+                rows.append(row)
+            w.table(headers, rows)
+
+
+# ---------------------------------------------------------------------------
+# role-drift
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="role-drift")
+def role_drift(db_name: Annotated[str, typer.Argument(metavar="DB")]):
+    """Detect drift between assigned res.users.role and actual res.groups membership."""
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        rows_data = db.get_role_drift(cur, include_sensitive=_include_sensitive)
+
+    with _writer() as w:
+        if rows_data is None:
+            # json/prometheus consumers need valid output, not the human message —
+            # the message still goes to stderr so an interactive run explains why.
+            if w.fmt == "json":
+                w.json([])
+                typer.echo("base_user_role module not installed.", err=True)
+            elif w.fmt == "prometheus":
+                w.prometheus([
+                    "# HELP odoo_db_role_drift_module_installed Whether the base_user_role module is installed",
+                    "# TYPE odoo_db_role_drift_module_installed gauge",
+                    f'odoo_db_role_drift_module_installed{{db="{db_name}"}} 0',
+                ])
+                typer.echo("base_user_role module not installed.", err=True)
+            else:
+                w.text("base_user_role module not installed.")
+            return
+
+        if w.fmt == "json":
+            w.json(rows_data)
+        elif w.fmt == "prometheus":
+            lines = [
+                "# HELP odoo_db_role_drift_users Users whose actual groups diverge from their assigned roles",
+                "# TYPE odoo_db_role_drift_users gauge",
+                f'odoo_db_role_drift_users{{db="{db_name}"}} {len(rows_data)}',
+            ]
+            w.prometheus(lines)
+        else:
+            if not rows_data:
+                w.text("No drift detected.")
+                return
+
+            def _fmt_groups(gs: list[dict]) -> str:
+                return "; ".join(f"{g['name']} ({g['category']})" if g["category"] else g["name"] for g in gs) or "-"
+
+            # "login" is only present when --include-sensitive-information is set
+            # (see db.compute_role_drift); user_id is always a safe, stable fallback.
+            rows = []
+            for r in rows_data:
+                rows.append([
+                    r.get("login", f"user_id={r['user_id']}"),
+                    ", ".join(r["roles"]) or "-",
+                    _fmt_groups(r["missing_groups"]),
+                    _fmt_groups(r["extra_groups"]),
+                ])
+            w.table(["user", "roles", "missing_groups", "extra_groups"], rows)
+
+
+# ---------------------------------------------------------------------------
 # locks
 # ---------------------------------------------------------------------------
 

@@ -1,6 +1,14 @@
 from typer.testing import CliRunner
 
-from odoo_db.db import _bloat_estimate_pages, _mime_family, _validate_attachment_orphans, get_config_parameters
+from odoo_db.db import (
+    _bloat_estimate_pages,
+    _groups_category_sql,
+    _localize,
+    _mime_family,
+    _validate_attachment_orphans,
+    compute_role_drift,
+    get_config_parameters,
+)
 from odoo_db.main import app
 
 runner = CliRunner()
@@ -19,6 +27,148 @@ def test_list_help():
 def test_modules_help():
     result = runner.invoke(app, ["modules", "--help"])
     assert result.exit_code == 0
+
+
+def test_groups_help():
+    result = runner.invoke(app, ["groups", "--help"])
+    assert result.exit_code == 0
+
+
+def test_roles_help():
+    result = runner.invoke(app, ["roles", "--help"])
+    assert result.exit_code == 0
+
+
+def test_role_drift_help():
+    result = runner.invoke(app, ["role-drift", "--help"])
+    assert result.exit_code == 0
+
+
+class _ProbeCursor:
+    """Fake cursor that only needs to answer the pg_attribute/to_regclass probe."""
+
+    def __init__(self, has_privilege_column: bool):
+        self._result = [(1,)] if has_privilege_column else []
+
+    def execute(self, query, params=None):
+        assert "pg_attribute" in query
+        assert "to_regclass('res_groups')" in query
+        assert "privilege_id" in query
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+
+def test_groups_category_sql_pre_19():
+    select_cols, join_sql = _groups_category_sql(_ProbeCursor(has_privilege_column=False))  # ty: ignore[invalid-argument-type]
+    assert select_cols == "NULL, NULL, mc.id, mc.name"
+    assert "res_groups_privilege" not in join_sql
+    assert "g.category_id" in join_sql
+
+
+def test_groups_category_sql_19_plus():
+    select_cols, join_sql = _groups_category_sql(_ProbeCursor(has_privilege_column=True))  # ty: ignore[invalid-argument-type]
+    assert select_cols == "p.id, p.name, mc.id, mc.name"
+    assert "res_groups_privilege p ON p.id = g.privilege_id" in join_sql
+    assert "p.category_id" in join_sql
+
+
+def test_localize():
+    # Odoo 16+: translated Char/Text fields come back as jsonb
+    assert _localize({"en_US": "Sales", "fr_FR": "Ventes"}) == "Sales"
+    # requested lang missing → falls back to any available translation
+    assert _localize({"fr_FR": "Ventes"}) == "Ventes"
+    # pre-17: plain string column
+    assert _localize("Sales") == "Sales"
+    # falsy / absent values normalize to ""
+    assert _localize(None) == ""
+    assert _localize({}) == ""
+    # requested lang present but null -> must not return that None itself;
+    # falls back to "" since no other translation has a truthy value either
+    assert _localize({"en_US": None}) == ""
+    # ... but a truthy fallback translation is still picked up
+    assert _localize({"en_US": None, "fr_FR": "Ventes"}) == "Ventes"
+
+
+def test_compute_role_drift():
+    # Sales Manager (role 1, marker group 10) resolves to {10, 11} via implied_ids;
+    # Sales User (role 2, marker group 11) resolves to {11} only; Admin (role 3,
+    # marker group 20) resolves to {10, 11, 20} - its closure legitimately implies
+    # the Sales Manager role's own marker group.
+    roles = [
+        {
+            "id": 1,
+            "group_id": 10,
+            "name": "Sales Manager",
+            "users": ["alice", "dave"],
+            "groups": [
+                {"id": 10, "name": "Manager", "category": "Sales"},
+                {"id": 11, "name": "User", "category": "Sales"},
+            ],
+        },
+        {
+            "id": 2,
+            "group_id": 11,
+            "name": "Sales User",
+            "users": ["bob"],
+            "groups": [{"id": 11, "name": "User", "category": "Sales"}],
+        },
+        {
+            "id": 3,
+            "group_id": 20,
+            "name": "Admin",
+            "users": ["eve"],
+            "groups": [
+                {"id": 10, "name": "Manager", "category": "Sales"},
+                {"id": 11, "name": "User", "category": "Sales"},
+                {"id": 20, "name": "Admin", "category": "Sales"},
+            ],
+        },
+    ]
+    groups = [
+        # alice: role-consistent. carol: has the Manager marker group but no role granting it (extra).
+        {"id": 10, "name": "Manager", "category": "Sales", "users": ["alice", "carol", "eve"]},
+        # dave: holds the Sales Manager role but is missing both its groups.
+        {"id": 11, "name": "User", "category": "Sales", "users": ["alice", "bob", "eve"]},
+        {"id": 20, "name": "Admin", "category": "Sales", "users": ["eve"]},
+        # not granted by any role -> never counted as drift, even though everyone has it.
+        {
+            "id": 99,
+            "name": "Internal User",
+            "category": "Technical",
+            "users": ["alice", "bob", "carol", "dave", "eve"],
+        },
+    ]
+
+    user_ids = {"alice": 1, "bob": 2, "carol": 3, "dave": 4, "eve": 5}
+
+    # default: no "login" key at all (PII) - only the stable, non-identifying user_id.
+    drift = compute_role_drift(roles, groups, user_ids)
+
+    # eve holds the Sales Manager marker (10) only via Admin's implied closure,
+    # fully covered by Admin's own resolved set -> not flagged.
+    assert drift == [
+        {
+            "user_id": 3,
+            "roles": [],
+            "missing_groups": [],
+            "extra_groups": [{"id": 10, "name": "Manager", "category": "Sales"}],
+        },
+        {
+            "user_id": 4,
+            "roles": ["Sales Manager"],
+            "missing_groups": [
+                {"id": 10, "name": "Manager", "category": "Sales"},
+                {"id": 11, "name": "User", "category": "Sales"},
+            ],
+            "extra_groups": [],
+        },
+    ]
+
+    # include_sensitive=True: same entries, "login" now present alongside user_id.
+    sensitive_drift = compute_role_drift(roles, groups, user_ids, include_sensitive=True)
+    assert [d["login"] for d in sensitive_drift] == ["carol", "dave"]
+    assert all("user_id" in d for d in sensitive_drift)
 
 
 def test_prepare_audit_help():
