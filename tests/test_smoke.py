@@ -8,6 +8,8 @@ from odoo_db.db import (
     _validate_attachment_orphans,
     compute_role_drift,
     get_config_parameters,
+    get_modules,
+    get_users,
 )
 from odoo_db.main import app
 
@@ -25,8 +27,15 @@ def test_list_help():
 
 
 def test_modules_help():
-    result = runner.invoke(app, ["modules", "--help"])
+    result = runner.invoke(app, ["modules", "--help"], env={"TERM": "dumb"})
     assert result.exit_code == 0
+    assert "--all" in result.output
+
+
+def test_users_help():
+    result = runner.invoke(app, ["users", "--help"], env={"TERM": "dumb"})
+    assert result.exit_code == 0
+    assert "--all" in result.output
 
 
 def test_groups_help():
@@ -251,6 +260,59 @@ def test_get_config_parameters_reveals_secrets_when_asked():
     result = get_config_parameters(cur, reveal=True)  # ty: ignore[invalid-argument-type]
 
     assert result == [{"key": "database.secret", "value": "a1b9f3e2c8d4"}]
+
+
+class _FakeSeqCursor:
+    """Cursor stand-in returning one queued result set per execute()."""
+
+    def __init__(self, *result_sets):
+        self._result_sets = list(result_sets)
+        self._current: list = []
+
+    def execute(self, query, params=None):
+        self._current = self._result_sets.pop(0)
+
+    def fetchall(self):
+        return self._current
+
+
+# (name, latest_version, auto_install, state)
+_MODULE_ROWS = [("base", "19.0.1.0", False, "installed"), ("sale", "19.0.1.0", False, "uninstalled")]
+# (login, name, state, active)
+_USER_ROWS = [("admin", "Mitchell Admin", "offline", True), ("old", "Ex Employee", "offline", False)]
+
+
+def test_get_modules_default_shape_unchanged():
+    cur = _FakeSeqCursor(_MODULE_ROWS[:1])
+    assert get_modules(cur) == [  # ty: ignore[invalid-argument-type]
+        {"name": "base", "version": "19.0.1.0", "auto_install": False}
+    ]
+
+
+def test_get_modules_include_uninstalled_adds_state_and_installed():
+    cur = _FakeSeqCursor(_MODULE_ROWS)
+    result = get_modules(cur, include_uninstalled=True)  # ty: ignore[invalid-argument-type]
+
+    assert [r["state"] for r in result] == ["installed", "uninstalled"]
+    # Must be real bools — consumers filter on truthiness of this key.
+    assert result[0]["installed"] is True
+    assert result[1]["installed"] is False
+
+
+def test_get_users_default_shape_unchanged():
+    cur = _FakeSeqCursor([("mail_presence",)], _USER_ROWS[:1])
+    assert get_users(cur) == [  # ty: ignore[invalid-argument-type]
+        {"login": "admin", "name": "Mitchell Admin", "state": "offline"}
+    ]
+
+
+def test_get_users_include_inactive_adds_active():
+    cur = _FakeSeqCursor([("bus_presence",)], _USER_ROWS)
+    result = get_users(cur, include_inactive=True)  # ty: ignore[invalid-argument-type]
+
+    assert [r["login"] for r in result] == ["admin", "old"]
+    assert result[0]["active"] is True
+    assert result[1]["active"] is False
 
 
 class _FakeCursor:

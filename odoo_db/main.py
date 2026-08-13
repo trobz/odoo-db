@@ -156,21 +156,34 @@ def cmd_list(
 
 
 @app.command()
-def modules(db_name: Annotated[str, typer.Argument(metavar="DB")]):
-    """List installed modules with version for a database."""
+def modules(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    include_uninstalled: Annotated[
+        bool,
+        typer.Option("--all", help="Also include modules that are not installed."),
+    ] = False,
+):
+    """List modules with version for a database."""
     with _handle_errors(db_name), db.cursor(db_name) as cur:
-        rows_data = db.get_modules(cur)
+        rows_data = db.get_modules(cur, include_uninstalled=include_uninstalled)
 
     with _writer() as w:
         if w.fmt == "json":
             w.json(rows_data)
         elif w.fmt == "prometheus":
+            # Gauge counts installed only, even with --all.
+            installed_count = sum(1 for r in rows_data if r["installed"]) if include_uninstalled else len(rows_data)
             lines = [
                 "# HELP odoo_db_modules_installed Installed module count",
                 "# TYPE odoo_db_modules_installed gauge",
-                f'odoo_db_modules_installed{{db="{db_name}"}} {len(rows_data)}',
+                f'odoo_db_modules_installed{{db="{db_name}"}} {installed_count}',
             ]
             w.prometheus(lines)
+        elif include_uninstalled:
+            w.table(
+                ["module", "version", "installed"],
+                [[r["name"], r["version"], str(r["installed"])] for r in rows_data],
+            )
         else:
             w.table(["module", "version"], [[r["name"], r["version"]] for r in rows_data])
 
@@ -349,25 +362,38 @@ def jobs(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 
 
 @app.command()
-def users(db_name: Annotated[str, typer.Argument(metavar="DB")]):
-    """List active users for a database."""
+def users(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    include_inactive: Annotated[
+        bool,
+        typer.Option("--all", help="Also include archived users."),
+    ] = False,
+):
+    """List users for a database."""
     with _handle_errors(db_name), db.cursor(db_name) as cur:
-        rows_data = db.get_users(cur)
+        rows_data = db.get_users(cur, include_inactive=include_inactive)
 
     with _writer() as w:
         if w.fmt == "json":
             w.json(rows_data)
         elif w.fmt == "prometheus":
-            connected = sum(1 for r in rows_data if r["state"] == "connected")
+            # Both gauges count active users only, with or without --all.
+            active_rows = [r for r in rows_data if r["active"]] if include_inactive else rows_data
+            connected = sum(1 for r in active_rows if r["state"] == "connected")
             lines = [
                 "# HELP odoo_db_users_active Active user count",
                 "# TYPE odoo_db_users_active gauge",
-                f'odoo_db_users_active{{db="{db_name}"}} {len(rows_data)}',
+                f'odoo_db_users_active{{db="{db_name}"}} {len(active_rows)}',
                 "# HELP odoo_db_users_connected Connected users (last 55s)",
                 "# TYPE odoo_db_users_connected gauge",
                 f'odoo_db_users_connected{{db="{db_name}"}} {connected}',
             ]
             w.prometheus(lines)
+        elif include_inactive:
+            w.table(
+                ["login", "name", "state", "active"],
+                [[r["login"], r["name"], r["state"], str(r["active"])] for r in rows_data],
+            )
         else:
             w.table(
                 ["login", "name", "state"],

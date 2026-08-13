@@ -33,11 +33,11 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `list`: List all Odoo databases: name, version,...
-* `modules`: List installed modules with version for a...
+* `modules`: List modules with version for a database.
 * `crons`: List scheduled actions for a database.
 * `params`: Show ir_config_parameter keys and values...
 * `jobs`: List queue job counts by state for a...
-* `users`: List active users for a database.
+* `users`: List users for a database.
 * `groups`: List res.groups for a database.
 * `roles`: List res.users.role (OCA base_user_role)...
 * `role-drift`: Detect drift between assigned...
@@ -66,7 +66,7 @@ $ odoo-db list [OPTIONS]
 
 ## `odoo-db modules`
 
-List installed modules with version for a database.
+List modules with version for a database.
 
 **Usage**:
 
@@ -80,6 +80,7 @@ $ odoo-db modules [OPTIONS] DB
 
 **Options**:
 
+* `--all`: Also include modules that are not installed.
 * `--help`: Show this message and exit.
 
 ## `odoo-db crons`
@@ -149,7 +150,7 @@ $ odoo-db jobs [OPTIONS] DB
 
 ## `odoo-db users`
 
-List active users for a database.
+List users for a database.
 
 **Usage**:
 
@@ -163,6 +164,7 @@ $ odoo-db users [OPTIONS] DB
 
 **Options**:
 
+* `--all`: Also include archived users.
 * `--help`: Show this message and exit.
 
 ## `odoo-db groups`
