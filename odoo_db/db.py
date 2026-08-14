@@ -434,6 +434,11 @@ def get_users(cur: psycopg.Cursor, *, include_inactive: bool = False) -> list[di
     ]
 
 
+def filter_online_users(rows: list[dict]) -> list[dict]:
+    """Keep only rows whose presence state is ``online``"""
+    return [r for r in rows if r["state"] == "online"]
+
+
 def get_users_by_year(cur: psycopg.Cursor) -> dict[int, int]:
     """Return ``{year: count}`` for active users grouped by ``create_date`` year.
 

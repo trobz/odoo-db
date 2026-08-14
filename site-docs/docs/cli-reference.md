@@ -165,6 +165,7 @@ $ odoo-db users [OPTIONS] DB
 **Options**:
 
 * `--all`: Also include archived users.
+* `--online`: Only show users currently online.
 * `--help`: Show this message and exit.
 
 ## `odoo-db groups`

@@ -7,6 +7,7 @@ from odoo_db.db import (
     _mime_family,
     _validate_attachment_orphans,
     compute_role_drift,
+    filter_online_users,
     get_config_parameters,
     get_modules,
     get_users,
@@ -36,6 +37,7 @@ def test_users_help():
     result = runner.invoke(app, ["users", "--help"], env={"TERM": "dumb"})
     assert result.exit_code == 0
     assert "--all" in result.output
+    assert "--online" in result.output
 
 
 def test_groups_help():
@@ -313,6 +315,17 @@ def test_get_users_include_inactive_adds_active():
     assert [r["login"] for r in result] == ["admin", "old"]
     assert result[0]["active"] is True
     assert result[1]["active"] is False
+
+
+def test_filter_online_users():
+    rows = [
+        {"login": "on", "state": "online"},
+        {"login": "idle", "state": "away"},
+        {"login": "off", "state": "offline"},
+        # No presence table on this Odoo version.
+        {"login": "no_presence", "state": "unknown"},
+    ]
+    assert filter_online_users(rows) == [{"login": "on", "state": "online"}]
 
 
 class _FakeCursor:

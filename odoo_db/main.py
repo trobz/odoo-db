@@ -368,14 +368,21 @@ def users(
         bool,
         typer.Option("--all", help="Also include archived users."),
     ] = False,
+    online: Annotated[
+        bool,
+        typer.Option("--online", help="Only show users currently online."),
+    ] = False,
 ):
     """List users for a database."""
     with _handle_errors(db_name), db.cursor(db_name) as cur:
         rows_data = db.get_users(cur, include_inactive=include_inactive)
 
+    # The gauges below count the full set, so --online only narrows the listing.
+    display_rows = db.filter_online_users(rows_data) if online else rows_data
+
     with _writer() as w:
         if w.fmt == "json":
-            w.json(rows_data)
+            w.json(display_rows)
         elif w.fmt == "prometheus":
             # Both gauges count active users only, with or without --all.
             active_rows = [r for r in rows_data if r["active"]] if include_inactive else rows_data
@@ -392,12 +399,12 @@ def users(
         elif include_inactive:
             w.table(
                 ["login", "name", "state", "active"],
-                [[r["login"], r["name"], r["state"], str(r["active"])] for r in rows_data],
+                [[r["login"], r["name"], r["state"], str(r["active"])] for r in display_rows],
             )
         else:
             w.table(
                 ["login", "name", "state"],
-                [[r["login"], r["name"], r["state"]] for r in rows_data],
+                [[r["login"], r["name"], r["state"]] for r in display_rows],
             )
 
 
