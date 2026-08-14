@@ -162,6 +162,23 @@ dump won't tell you):
   `odoo_db/db.py` under `_RECOGNIZED_FUNCTIONS` / `_RECOGNIZED_TRIGGERS`.
 - `crons --running` is transient debug data, intentionally excluded from
   `prepare-audit`. `crons --all` additionally lists inactive crons.
+- `crons`, `modules` and `users` share one `--all` convention: default output
+  shows only in-use rows (active crons/users, installed modules) and the flag
+  drops the SQL filter *and* adds the status key (`active` for crons/users,
+  `state` + `installed` for modules). The key is added **only** when the flag
+  is set — `odoo-activity`'s TUI and MCP `db_query` read the default shape, so
+  it must stay byte-identical. Prometheus gauges keep counting installed/active
+  rows only, with or without `--all`, so alert thresholds don't move.
+  `prepare-audit` calls `get_modules(cur)` with no kwargs, so its bundle is
+  unaffected.
+- `users --online` narrows to `state == 'online'`. `state` comes from
+  `mail_presence.status` (Odoo 19+) / `bus_presence.status` (14-18), whose
+  selection is `online`/`away`/`offline` — `away` is an idle session so it is
+  *not* online, and the no-presence-table fallback (`unknown`) never matches.
+  The filter is `db.filter_online_users()` (a pure list-of-dicts function,
+  unit-tested without a cursor) applied in `main.py` *after* the fetch, so the
+  prometheus branch still counts every row and the gauges don't move — same
+  rule as `--all`.
 - `params` prints `ir_config_parameter` key/value pairs; it's a local debug
   tool, not part of `prepare-audit`. Optional `[PATTERN]` arg does a
   case-insensitive substring match on `key` (`ILIKE '%pattern%'`). Values of

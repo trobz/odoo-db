@@ -177,14 +177,25 @@ def get_db_summary(dbname: str, verbose: bool = False) -> DbSummary | None:
         return None
 
 
-def get_modules(cur: psycopg.Cursor) -> list[dict]:
-    cur.execute("""
-        SELECT name, latest_version, auto_install
-        FROM ir_module_module
-        WHERE state = 'installed'
-        ORDER BY name
-    """)
-    return [{"name": row[0], "version": row[1] or "", "auto_install": bool(row[2])} for row in cur.fetchall()]
+def get_modules(cur: psycopg.Cursor, *, include_uninstalled: bool = False) -> list[dict]:
+    where_clause = sql.SQL("") if include_uninstalled else sql.SQL("WHERE state = 'installed'")
+    cur.execute(
+        sql.SQL("""
+            SELECT name, latest_version, auto_install, state
+            FROM ir_module_module
+            {where}
+            ORDER BY name
+        """).format(where=where_clause)
+    )
+    return [
+        {
+            "name": row[0],
+            "version": row[1] or "",
+            "auto_install": bool(row[2]),
+            **({"state": row[3], "installed": row[3] == "installed"} if include_uninstalled else {}),
+        }
+        for row in cur.fetchall()
+    ]
 
 
 def get_module_dependents(cur: psycopg.Cursor) -> dict[str, int]:
@@ -377,39 +388,55 @@ def get_jobs(cur: psycopg.Cursor) -> list[dict] | None:
     return [{"state": row[0], "count": row[1]} for row in cur.fetchall()]
 
 
-def get_users(cur: psycopg.Cursor) -> list[dict]:
+def get_users(cur: psycopg.Cursor, *, include_inactive: bool = False) -> list[dict]:
     cur.execute("SELECT tablename FROM pg_tables WHERE tablename IN ('mail_presence', 'bus_presence')")
     presence_tables = {row[0] for row in cur.fetchall()}
 
+    where_clause = sql.SQL("") if include_inactive else sql.SQL("WHERE ru.active = TRUE")
+
     if "mail_presence" in presence_tables:
         # Odoo 19+: mail.presence with direct status column
-        cur.execute("""
-            SELECT ru.login, rp.name, COALESCE(mp.status, 'offline') AS state
+        query = sql.SQL("""
+            SELECT ru.login, rp.name, COALESCE(mp.status, 'offline') AS state, ru.active
             FROM res_users ru
             LEFT JOIN res_partner rp ON ru.partner_id = rp.id
             LEFT JOIN mail_presence mp ON mp.user_id = ru.id
-            WHERE ru.active = TRUE
+            {where}
             ORDER BY ru.login
         """)
     elif "bus_presence" in presence_tables:
         # Odoo 14-18: bus.presence.status is updated in real-time (HTTP and WebSocket)
-        cur.execute("""
-            SELECT ru.login, rp.name, COALESCE(bp.status, 'offline') AS state
+        query = sql.SQL("""
+            SELECT ru.login, rp.name, COALESCE(bp.status, 'offline') AS state, ru.active
             FROM res_users ru
             LEFT JOIN res_partner rp ON ru.partner_id = rp.id
             LEFT JOIN bus_presence bp ON bp.user_id = ru.id
-            WHERE ru.active = TRUE
+            {where}
             ORDER BY ru.login
         """)
     else:
-        cur.execute("""
-            SELECT ru.login, rp.name, 'unknown' AS state
+        query = sql.SQL("""
+            SELECT ru.login, rp.name, 'unknown' AS state, ru.active
             FROM res_users ru
             LEFT JOIN res_partner rp ON ru.partner_id = rp.id
-            WHERE ru.active = TRUE
+            {where}
             ORDER BY ru.login
         """)
-    return [{"login": row[0], "name": row[1] or "", "state": row[2]} for row in cur.fetchall()]
+    cur.execute(query.format(where=where_clause))
+    return [
+        {
+            "login": row[0],
+            "name": row[1] or "",
+            "state": row[2],
+            **({"active": bool(row[3])} if include_inactive else {}),
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def filter_online_users(rows: list[dict]) -> list[dict]:
+    """Keep only rows whose presence state is ``online``"""
+    return [r for r in rows if r["state"] == "online"]
 
 
 def get_users_by_year(cur: psycopg.Cursor) -> dict[int, int]:
