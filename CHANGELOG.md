@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.19.0 (2026-08-14)
+
+### Features
+
+- **modules,users**: Add --all flag to include uninstalled and archived rows
+  ([`7a56d8f`](https://github.com/trobz/odoo-db/commit/7a56d8f461ac776ee7d1eab5222b302f64ff266a))
+
+- **users**: Add --online flag to show only online users
+  ([`b02c258`](https://github.com/trobz/odoo-db/commit/b02c25816008de7d6ebecc0b18fa027db31d72de))
+
+
 ## v1.18.0 (2026-07-27)
 
 ### Features
