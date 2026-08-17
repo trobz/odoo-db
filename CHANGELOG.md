@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.20.0 (2026-08-17)
+
+### Features
+
+- Add dump and restore commands
+  ([`039018d`](https://github.com/trobz/odoo-db/commit/039018d149a516bb7fc117834cfe91d815170699))
+
+
 ## v1.19.0 (2026-08-14)
 
 ### Features
