@@ -3,8 +3,12 @@ from __future__ import annotations
 import logging
 import math
 import re
+import secrets
+import string
+import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import psycopg
 from psycopg import sql
@@ -2421,3 +2425,72 @@ def get_locks(cur: psycopg.Cursor, dbname: str) -> dict:
         "details": [{"blocked_pid": bp, "blocking_pids": pids} for bp, pids in blocked_by.items()],
         "queries": {str(pid): q for pid, q in queries.items()},
     }
+
+
+# ---------------------------------------------------------------------------
+# dump / restore helpers
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def admin_connect():
+    """Autocommit connection to `postgres` for DDL (CREATE/DROP DATABASE).
+
+    CREATE/DROP DATABASE cannot run inside a transaction, so we force
+    autocommit. Keep DDL statements narrow and short-lived.
+    """
+    with psycopg.connect("dbname=postgres", autocommit=True) as conn:
+        yield conn
+
+
+def db_exists(cur: psycopg.Cursor, name: str) -> bool:
+    cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+    return cur.fetchone() is not None
+
+
+def create_database(cur: psycopg.Cursor, name: str) -> None:
+    cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+
+
+def drop_database_if_exists(cur: psycopg.Cursor, name: str) -> None:
+    cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(name)))
+
+
+def run_pg_dump(dbname: str, output: Path, verbose: bool = False) -> None:
+    """Dump `dbname` to `output` using pg_dump custom format (`-Fc`).
+
+    Custom format is a single self-contained file that `pg_restore -j` can
+    read in parallel, so callers get parallel restore without needing the
+    directory format.
+    """
+    cmd = ["pg_dump", "-Fc", "-f", str(output)]
+    if verbose:
+        cmd.append("-v")
+    cmd.append(dbname)
+    logger.debug("running: %s", " ".join(cmd))
+    # Fixed argv[0] (pg_dump); DB name / output path are the wrapper's whole point.
+    subprocess.run(cmd, check=True)  # noqa: S603
+
+
+def run_pg_restore(dbname: str, backup: Path, jobs: int = 1, verbose: bool = False) -> int:
+    """Restore `backup` into `dbname`. Returns pg_restore's exit code.
+
+    Not raised on non-zero so the caller can decide whether to drop the
+    freshly created database.
+    """
+    cmd = ["pg_restore", "--no-owner", "-x", "-j", str(jobs), "-d", dbname]
+    if verbose:
+        cmd.append("-v")
+    cmd.append(str(backup))
+    logger.debug("running: %s", " ".join(cmd))
+    # Fixed argv[0] (pg_restore); DB name / backup path are the wrapper's whole point.
+    return subprocess.run(cmd, check=False).returncode  # noqa: S603
+
+
+def reset_all_user_passwords(cur: psycopg.Cursor, password: str) -> None:
+    cur.execute("UPDATE res_users SET password = %s", (password,))
+
+
+def generate_password(length: int = 16) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))

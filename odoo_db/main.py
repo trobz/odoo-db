@@ -1301,5 +1301,115 @@ def cmd_prepare_audit(
     )
 
 
+# ---------------------------------------------------------------------------
+# dump
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def dump(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    file: Annotated[
+        Path | None,
+        typer.Option("--file", "-f", help="Output path (default: ./<db>.pgdump)."),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force/--no-force", help="Overwrite the output file if it already exists."),
+    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Pass -v to pg_dump.")] = False,
+):
+    """Dump an Odoo database using pg_dump custom format (-Fc)."""
+    output = file if file is not None else Path(f"{db_name}.pgdump")
+    if output.exists() and not force:
+        typer.echo(f"Error: {output} already exists. Pass --force to overwrite.", err=True)
+        raise typer.Exit(1)
+    parent = output.parent
+    if str(parent) not in ("", "."):
+        parent.mkdir(parents=True, exist_ok=True)
+    with _handle_errors(db_name):
+        db.run_pg_dump(db_name, output, verbose=verbose)
+    typer.echo(f"Dumped {db_name} -> {output}")
+
+
+# ---------------------------------------------------------------------------
+# restore
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def restore(
+    backup_path: Annotated[Path, typer.Argument(metavar="BACKUP")],
+    db_name: Annotated[
+        str | None,
+        typer.Option("--db", help="Target database name (default: derived from backup filename)."),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force/--no-force", help="Drop an existing database with the same name before restoring."),
+    ] = False,
+    jobs: Annotated[int, typer.Option("--jobs", "-j", help="Parallel restore jobs.")] = 1,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Pass -v to pg_restore.")] = False,
+    reset_passwords: Annotated[
+        bool,
+        typer.Option(
+            "--reset-passwords",
+            help="After restore, reset every res_users password. Skipped with a warning on non-Odoo DBs.",
+        ),
+    ] = False,
+    password: Annotated[
+        str | None,
+        typer.Option("--password", "-P", help="Password used with --reset-passwords (default: random 16 chars)."),
+    ] = None,
+):
+    """Restore a pg_dump backup into a new database using pg_restore."""
+    if not backup_path.exists():
+        typer.echo(f"Error: backup file {backup_path} not found.", err=True)
+        raise typer.Exit(1)
+
+    target = db_name if db_name is not None else backup_path.stem.replace("-", "_")
+
+    with _handle_errors(target):
+        with db.admin_connect() as conn, conn.cursor() as cur:
+            if force:
+                db.drop_database_if_exists(cur, target)
+            elif db.db_exists(cur, target):
+                typer.echo(
+                    f"Error: database {target!r} already exists. Use --force to drop it, or --db to choose a name.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            db.create_database(cur, target)
+
+        typer.echo(f"Restoring {backup_path} -> {target}...")
+        rc = db.run_pg_restore(target, backup_path, jobs=jobs, verbose=verbose)
+        if rc != 0:
+            typer.echo(
+                f"pg_restore exited with code {rc}. The database may be incomplete.",
+                err=True,
+            )
+            if typer.confirm(f"Drop the newly created database {target!r}?", default=False):
+                with db.admin_connect() as conn, conn.cursor() as cur:
+                    db.drop_database_if_exists(cur, target)
+                typer.echo(f"Dropped {target}.")
+            raise typer.Exit(rc)
+
+        if reset_passwords:
+            with db.cursor(target) as cur:
+                if not db._is_odoo(cur):
+                    typer.echo(
+                        f"Warning: {target!r} does not look like an Odoo database "
+                        "(no ir_module_module table); skipping password reset.",
+                        err=True,
+                    )
+                else:
+                    pwd = password if password else db.generate_password()
+                    db.reset_all_user_passwords(cur, pwd)
+                    cur.connection.commit()
+                    typer.echo(f"Reset all res_users passwords to: {pwd}")
+
+    typer.echo(f"Restore complete -> {target}")
+
+
 if __name__ == "__main__":
     app()

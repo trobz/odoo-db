@@ -206,6 +206,17 @@ dump won't tell you):
 - `--include-sensitive-information` is a global PII master switch on the root
   callback (stored in `_include_sensitive`); a command's own opt-in flag is
   OR'd with it (e.g. `attachments` filenames show if either is set).
+- `dump` / `restore` are the only write-side commands and the only ones that
+  shell out to `pg_dump` / `pg_restore`. They share the peer-auth Unix-socket
+  connection model of the rest of the CLI — pg_dump/pg_restore use libpq too,
+  so `PGHOST`/`PGUSER` env vars work the same way. `dump` always uses custom
+  format (`-Fc`) so restore can parallelise with `-j` from a single file.
+  `restore` creates the target DB itself via `admin_connect()` (an autocommit
+  connection to `postgres` — CREATE/DROP DATABASE can't run in a transaction);
+  if pg_restore exits non-zero it prompts to drop the newly created DB so a
+  half-restored shell doesn't linger. `--reset-passwords` runs
+  `UPDATE res_users` and is silently skipped (with a warning) on non-Odoo DBs
+  detected via `_is_odoo`.
 - `bloat` uses a two-tier engine. **Estimate (always):** statistical guess
   from `pg_class` (`relpages`/`reltuples`) + `pg_stats` avg column widths — no
   extension, any role, but coarse and stale-stats-sensitive; per-row overhead

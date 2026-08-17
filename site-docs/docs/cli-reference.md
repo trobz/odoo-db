@@ -48,6 +48,8 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `studio`: Show Studio customizations: custom models,...
 * `not-odoo`: Show non-Odoo database objects: custom...
 * `prepare-audit`: Combine summary + modules + stats +...
+* `dump`: Dump an Odoo database using pg_dump custom...
+* `restore`: Restore a pg_dump backup into a new...
 
 ## `odoo-db list`
 
@@ -381,4 +383,49 @@ $ odoo-db prepare-audit [OPTIONS] DB
 * `-y, --years INTEGER`: Years for stats breakdown  \[default: 3\]
 * `-n, --top INTEGER`: Top tables by size to include (0 = all)  \[default: 0\]
 * `--admin-user TEXT`: Login to exclude from customized-records scan (repeat for multiple). Use when the project admin uses a personal account instead of &#x27;admin&#x27;.
+* `--help`: Show this message and exit.
+
+## `odoo-db dump`
+
+Dump an Odoo database using pg_dump custom format (-Fc).
+
+**Usage**:
+
+```console
+$ odoo-db dump [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
+* `-f, --file PATH`: Output path (default: ./&lt;db&gt;.pgdump).
+* `--force / --no-force`: Overwrite the output file if it already exists.  \[default: no-force\]
+* `-v, --verbose`: Pass -v to pg_dump.
+* `--help`: Show this message and exit.
+
+## `odoo-db restore`
+
+Restore a pg_dump backup into a new database using pg_restore.
+
+**Usage**:
+
+```console
+$ odoo-db restore [OPTIONS] BACKUP
+```
+
+**Arguments**:
+
+* `BACKUP`: \[required\]
+
+**Options**:
+
+* `--db TEXT`: Target database name (default: derived from backup filename).
+* `--force / --no-force`: Drop an existing database with the same name before restoring.  \[default: no-force\]
+* `-j, --jobs INTEGER`: Parallel restore jobs.  \[default: 1\]
+* `-v, --verbose`: Pass -v to pg_restore.
+* `--reset-passwords`: After restore, reset every res_users password. Skipped with a warning on non-Odoo DBs.
+* `-P, --password TEXT`: Password used with --reset-passwords (default: random 16 chars).
 * `--help`: Show this message and exit.

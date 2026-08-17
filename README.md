@@ -55,6 +55,8 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `not-odoo <db>` | Show non-Odoo database objects: custom views, triggers, functions, and stored procedures. Triggers/functions are tagged `recognized` (known infra: `unaccent`, `queue_job_notify`, …) or `custom` |
 | `attachments <db>` | Read-only `ir.attachment` storage audit: repartition (storage location, by-model, mimetype family, size distribution, growth by year, largest files) plus cleanup/archive candidates (uninstalled-model orphans, regenerable asset bundles, duplicate checksums, aged transient, DB-stored bulk). `--validate-orphans` adds dead-`res_id` detection for the heaviest models. Sizes are `file_size` sums (reliable on any backend; payloads never read). Filenames are redacted by default — pass `--include-individual-filenames` (or the global `--include-sensitive-information`) to show them |
 | `prepare-audit <db>` | Bundle summary + modules + `model_owners` + `orphan_tables` + `users_by_year` + stats + not-odoo + `studio_customizations` into `<db>.json` (in the current directory) for `/odoo-dev:audit-db` (`--years N`, `--top N`; `--top 0` means all tables). `orphan_tables` flags tables not owned by any installed module (reason: `uninstalled_module` or `no_ownership_data`). Every table in `stats.tables` and `orphan_tables` carries `functional_group` (first underscore component) for display-time grouping by functional area. `users_by_year` is an aggregate `{year: count}` of active users by `create_date` year — zero PII so the file can ship without an NDA. `studio_customizations` includes custom model list, extended model list, and studio-flagged record counts by type. The deep attachment audit is intentionally a separate command (`attachments`), not bundled here |
+| `dump <db>` | Dump a database with `pg_dump` custom format (`-Fc`). Writes to `./<db>.pgdump` by default (`--file PATH` to override); `--force` overwrites; `--verbose` streams pg_dump progress |
+| `restore <backup>` | Restore a `pg_dump` file with `pg_restore` (`--no-owner -x`). Target DB defaults to the backup filename stem (`--db NAME` to override); `--force` drops an existing DB first; `--jobs N` parallelises restore; `--verbose` streams pg_restore progress. `--reset-passwords` sets every `res_users.password` to `--password PWD` (or a random 16-char one) after restore — only on Odoo DBs, otherwise warns and skips |
 
 ## Examples
 
@@ -127,6 +129,21 @@ odoo-db prepare-audit my_db
 
 # Custom output path
 odoo-db --output-file /tmp/audit.json prepare-audit my_db
+
+# Dump a database (writes ./my_db.pgdump)
+odoo-db dump my_db
+
+# Dump to a custom path, overwriting any existing file
+odoo-db dump my_db --file /tmp/my_db.pgdump --force
+
+# Restore into a database derived from the backup filename
+odoo-db restore /tmp/my_db.pgdump
+
+# Restore into a specific DB with 4 parallel jobs, dropping any existing DB
+odoo-db restore /tmp/my_db.pgdump --db my_db_copy --force -j 4
+
+# Restore + reset every res_users password to a random one (prints it)
+odoo-db restore /tmp/my_db.pgdump --db my_db_copy --force --reset-passwords
 ```
 
 ## Dev
