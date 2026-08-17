@@ -35,13 +35,22 @@ class Writer:
         rows: list[list[str]],
         empty_msg: str = "(no results)",
         footer: list[str] | None = None,
+        fold: frozenset[str] | None = None,
     ):
         if not rows:
             self._write(empty_msg)
             return
         t = Table(show_header=True, header_style="bold cyan", show_lines=True, show_footer=footer is not None)
         for i, h in enumerate(headers):
-            t.add_column(h, footer=("[bold]" + footer[i] + "[/bold]") if footer else "")
+            # `fold` wraps mid-token instead of eliding: for a column holding a
+            # single unbreakable token (a hostname, a credential), rich's default
+            # `ellipsis` silently drops characters as soon as the table is
+            # narrower than the content.
+            t.add_column(
+                h,
+                footer=("[bold]" + footer[i] + "[/bold]") if footer else "",
+                overflow="fold" if fold and h in fold else "ellipsis",
+            )
         for row in rows:
             t.add_row(*row)
         console = Console(file=self._f)

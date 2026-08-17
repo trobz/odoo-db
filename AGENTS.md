@@ -187,6 +187,47 @@ dump won't tell you):
   (`secret`, `password`, `token`, `api_key`, `dsn`, ...) in `odoo_db/db.py`.
   The global `--include-sensitive-information` reveals values (no per-command
   flag). Masking applies to `text` and `json`; `prometheus` emits only a count.
+- `mail` audits outbound mail config (`get_mail_audit`). Ports a script that
+  checked the same data via the Odoo API (`odooly`) to direct SQL — none of
+  it needs auth. Dict keys are unordered; CLI `text` leads with
+  `config_parameters`, odoo-activity's TUI (`panes/mail.py`) instead leads
+  with `mail_servers` (see that repo's AGENTS.md/README). Top-level: 3 bool
+  flags — `is_neutralized` (`get_is_neutralized`),
+  `is_legacy_mail_config_configured` (`_is_legacy_mail_config_configured`:
+  was any of the 4 pre-v17 ICP mail keys ever set — permanently true once
+  it has been, migrated or not) and `is_alias_domain_migration_pending`
+  (`_is_alias_domain_migration_pending`: of those, is the leftover config
+  still live — true only when a legacy key is set **and** a company still
+  has no alias domain; this is the one that separates "migrated fine" from
+  "still stuck") — plus 5 sections: `config_parameters`
+  (`get_mail_config_parameters`), `alias_domains`
+  (`get_mail_alias_domains`, Odoo 17+ only, `None` pre-17), `addresses`
+  (`get_mail_addresses`), `mail_servers` (`get_mail_servers`, `ir.mail_server`
+  ordered by `sequence`, each row flagged `is_test_catcher`/
+  `known_production_relay`/`is_neutralization_stub` — see
+  `_is_test_mail_catcher`/`_known_production_relay`/
+  `_is_neutralization_stub_mail_server`), `modules`
+  (`get_mail_relevant_modules`, currently just `mass_mailing`).
+
+  `mail_servers[].smtp_user`/`smtp_pass` are masked (`_SECRET_MASK`) like any
+  other secret; `--include-sensitive-information` reveals both.
+  `addresses` (company/OdooBot/admin) are organizational mailboxes, not
+  individual PII, and are deliberately never masked — see `get_mail_addresses`.
+
+  CLI `text` output (not `get_mail_audit()` itself, which always returns the
+  full 6-key `config_parameters` list) drops the 4 legacy ICP keys once
+  `is_alias_domain_migration_pending` is `False` — see
+  `_relevant_mail_config_parameters`, called from `main.py`. `json` never
+  filters, so the two formats diverge on those 4 keys by design (see that
+  function's docstring for why: cross-version JSON diffing needs the full
+  list).
+
+  Rationale for individual checks (upstream commit hashes for
+  `smtp_authentication`/`from_filter`, the neutralization stub row, the
+  test-catcher marker/host lists incl. the `papercut` exclusion and the
+  Mailtrap sandbox-vs-live split, the known-production-relay table, the
+  demo-data default addresses) lives in the corresponding function
+  docstrings/comments in `db.py`, not here.
 - `attachments` audits `ir.attachment` storage in pure SQL — no ORM, so it
   sees field-backed rows (`image_1920`, logos, signatures) natively. The ORM's
   `_search` auto-injects `res_field = False` and hides them; raw SQL has no

@@ -44,6 +44,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 | `crons <db>` | List active scheduled actions (`--all` also includes inactive ones). `--running` shows crons currently held by an Odoo worker (RowShareLock on `ir_cron`) — transient debug data, not bundled into `prepare-audit`. `--include-code` adds the python source of each `state='code'` cron (ignored with `--running`, which already always shows it) |
 | `jobs <db>` | Queue job counts by state (requires `queue_job` module) |
 | `params <db> [pattern]` | Show `ir_config_parameter` keys and values. Optional `pattern` narrows to keys containing it (case-insensitive substring). Values of secret-bearing keys are masked `********` by default; the global `--include-sensitive-information` reveals them |
+| `mail <db>` | Audit outbound mail configuration: whether the database is neutralized (`database.is_neutralized`, the single most common reason mail never leaves an Odoo database — flagged up front, with Odoo's own inserted stub relay named in its own summary line rather than mistaken for a real one); the `ir_config_parameter` keys mail cares about (`mail.bounce.alias`, `mail.catchall.alias`/`.domain`, `mail.default.from`, plus Trobz's `default_email` and `mail.default.from_filter`); on Odoo 17+, the per-company `mail.alias.domain` records that actually control bounce/catchall/default-from routing now (the first 4 of those ICP keys became legacy in v17 and are hidden from the CLI's text output once they can no longer affect routing — shown side by side with a note otherwise, on a pre-17 database where they're the only mechanism or a 17+ one where a company still has no alias domain assigned while a legacy key still holds a value; Odoo never clears those keys even on a database that migrated fine, so a leftover value alone doesn't mean the migration is stuck — the JSON output always keeps the full list, since this tool's main job is comparing it across a v16-to-v19 migration; `mail.default.from_filter` stays live at runtime and is not part of that migration); company/system(OdooBot)/admin partner emails, resolved via `ir_model_data` so a renamed admin login or a deleted record still shows up (as `(record missing)`) instead of silently vanishing — shown as-is (organizational mailboxes, not individual PII), flagged if still at Odoo default (case-insensitively); outgoing `ir.mail_server` relays, named in a summary line (not a per-row column) when the name/host matches a known test-mail catcher like mailhog or a well-known managed relay like Google Workspace or Microsoft 365 — a positive confirmation, not just the absence of the other flag; and `mass_mailing` install state. Ported from an odooly/API-based check to direct SQL — none of it needs auth. SMTP username/password are masked by default; the global `--include-sensitive-information` reveals them |
 | `users <db>` | List active users with connection status |
 | `groups <db>` | List `res.groups` (category, name, share flag). `--include-users` adds each group's member logins. `--include-acls` adds per-group model access rights and record rules, plus top-level `global_acls`/`global_rules` for rows with no group at all (apply to every user — excluded from prior output, now the highest-value rows in a permission audit) |
 | `roles <db>` | List `res.users.role` (requires OCA `base_user_role`; prints a message if not installed). `--include-users` adds currently-enabled assigned users' logins. `--include-groups` adds the role's full resolved group set (its own group plus all directly and transitively implied groups) |
@@ -87,6 +88,12 @@ odoo-db params my_db mail
 
 # Reveal masked secret values (database.secret, api keys, ...)
 odoo-db --include-sensitive-information params my_db
+
+# Audit outbound mail configuration (config keys, key addresses, relays, mass_mailing)
+odoo-db mail my_db
+
+# Same, revealing masked addresses and SMTP passwords
+odoo-db --include-sensitive-information mail my_db
 
 # List access groups, with members and ACLs
 odoo-db groups my_db --include-users --include-acls

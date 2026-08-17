@@ -125,6 +125,17 @@ def _is_odoo(cur: psycopg.Cursor) -> bool:
     return bool(cur.fetchone())
 
 
+def get_is_neutralized(cur: psycopg.Cursor) -> bool:
+    """`base/data/neutralize.sql` (identical 16.0-19.0, absent on 14.0) sets
+    `database.is_neutralized` via a plain SQL `VALUES (..., true)` — Postgres
+    stores that as the lowercase text `'true'`, not `'True'`, so the check
+    must be case-folded (a `row[0] == "True"` comparison here would silently
+    report every neutralized database as not neutralized)."""
+    cur.execute("SELECT value FROM ir_config_parameter WHERE key = 'database.is_neutralized'")
+    row = cur.fetchone()
+    return bool(row) and str(row[0]).strip().lower() in ("true", "t", "1")
+
+
 def list_databases(cur: psycopg.Cursor) -> list[str]:
     cur.execute("""
             SELECT datname FROM pg_database
@@ -158,9 +169,7 @@ def get_db_summary(dbname: str, verbose: bool = False) -> DbSummary | None:
             parts = row[0].split(".")
             version = ".".join(parts[:2]) if len(parts) >= 2 else row[0]
 
-            cur.execute("SELECT value FROM ir_config_parameter WHERE key='database.is_neutralized'")
-            row = cur.fetchone()
-            neutralized = row is not None and row[0] == "True"
+            neutralized = get_is_neutralized(cur)
 
             module_count = user_count = None
             if verbose:
@@ -2141,6 +2150,588 @@ def get_company_count(cur: psycopg.Cursor) -> int:
     """Return total company count from res_company."""
     cur.execute("SELECT count(*) FROM res_company")
     return _fetch_one(cur)[0]
+
+
+# ---------------------------------------------------------------------------
+# mail
+# ---------------------------------------------------------------------------
+
+# (key, explanation) — the ir_config_parameter keys a mail-config audit cares
+# about: who mail claims to be from, and where bounces/catch-alls land.
+# `default_email` is Trobz-specific (read by trobz_base), not an Odoo core
+# key, kept alongside the others since it answers the same question.
+_MAIL_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
+    ("mail.bounce.alias", ""),
+    ("mail.catchall.alias", ""),
+    ("mail.catchall.domain", ""),
+    ("default_email", "Trobz-specific, used by trobz_base"),
+    ("mail.default.from", ""),
+    ("mail.default.from_filter", ""),
+)
+
+
+def get_mail_config_parameters(cur: psycopg.Cursor) -> list[dict]:
+    """``ir_config_parameter`` values relevant to outbound mail identity/bounces.
+
+    None of ``_MAIL_CONFIG_KEYS`` match ``_is_sensitive_key`` so values are
+    never masked here. Keys not set in the database still get a row with
+    ``value: None``, matching the original API-based check's "(not defined)"
+    — via ``dict.get``, which only falls through to that default when the
+    key is genuinely absent. A key that exists with an empty-string value
+    (distinct from absent — Odoo's own ``get_param`` treats them
+    differently too) is preserved as ``""``, not coerced to ``None``; the
+    caller (``main.py``) must check ``is None`` rather than falsy-test the
+    value, or it collapses "never configured" and "configured blank" into
+    the same "(not defined)" display (verified against real data: on a
+    v16 staging database of ours, ``mail.catchall.domain``'s row exists
+    with value ``""``).
+    """
+    keys = [k for k, _ in _MAIL_CONFIG_KEYS]
+    cur.execute("SELECT key, value FROM ir_config_parameter WHERE key = ANY(%s)", (keys,))
+    values = dict(cur.fetchall())
+    return [{"key": k, "explanation": explanation, "value": values.get(k)} for k, explanation in _MAIL_CONFIG_KEYS]
+
+
+# The 4 legacy ICP keys mail.alias_domain._migrate_icp_to_domain() actually
+# reads (mail/models/mail_alias_domain.py) -- deliberately narrower than
+# _MAIL_CONFIG_KEYS, which also includes Trobz's own default_email and
+# mail.default.from_filter (never read by that migration).
+_LEGACY_ALIAS_MIGRATION_KEYS = frozenset({
+    "mail.catchall.domain",
+    "mail.bounce.alias",
+    "mail.catchall.alias",
+    "mail.default.from",
+})
+
+
+def _is_legacy_mail_config_configured(config_parameters: list[dict]) -> bool:
+    """Whether any of the pre-v17 ICP mail keys was ever actually set.
+
+    True for *any* database that went through a v16-style config at some
+    point, not just a stuck one: ``_migrate_icp_to_domain`` reads these 4
+    keys but never clears them (``mail/models/mail_alias_domain.py``: it
+    only ``get_param``s them and creates a record), so a leftover value is
+    the permanent state of a *successfully* migrated database too. On its
+    own this does not separate "migrated fine" from "migration still
+    pending" — see ``_is_alias_domain_migration_pending`` for that. Still
+    useful by itself for the gauge this was originally added for: without
+    it, ``odoo_db_mail_companies_missing_alias_domain`` reads 1 on
+    essentially every stock 17+ install and can't be alerted on — the
+    exact "flags nearly everything" trap this file already documents for
+    role-drift's ``extra_groups``.
+    """
+    return any(p["value"] for p in config_parameters if p["key"] in _LEGACY_ALIAS_MIGRATION_KEYS)
+
+
+def _is_alias_domain_migration_pending(alias_domains: list[dict] | None, *, legacy_configured: bool) -> bool:
+    """Whether the pre-17 ICP mail config still has an effect left to have.
+
+    ``_migrate_icp_to_domain`` reads the 4 legacy keys but never clears
+    them, so a leftover value is the permanent state of any *successfully*
+    migrated database, not evidence of a stuck one — verified across real
+    databases: one production v17 with the ICP keys still set has every
+    company with an alias domain (migrated fine), distinct from a v16
+    database with the same keys set and no ``mail_alias_domain`` table at
+    all (pre-17, not migrated yet). What actually separates "still
+    pending" from "done" is whether a company still has no alias domain:
+    only then can those leftover keys still be picked up by a (re-)run of
+    the migration.
+    """
+    if alias_domains is None or not legacy_configured:
+        return False
+    return any(a["alias_domain_id"] is None for a in alias_domains)
+
+
+def _relevant_mail_config_parameters(
+    config_parameters: list[dict], *, alias_domains: list[dict] | None, migration_pending: bool
+) -> list[dict]:
+    """Drop the 4 legacy ICP keys when they can no longer affect routing:
+    Odoo 17+ (``alias_domains`` is not ``None``) and no migration left to
+    run (see ``_is_alias_domain_migration_pending``). Showing them right
+    next to the authoritative ``alias_domains`` section reads as if they
+    were still part of the active config — the opposite of helpful for a
+    reader debugging mail on a modern, working database. Kept whenever
+    they ARE relevant: pre-17 (no ``mail_alias_domain`` table at all, so
+    these are the only mechanism) or an unfinished v16-to-17 upgrade (a
+    company with no alias domain, where they can still be read).
+    """
+    if alias_domains is not None and not migration_pending:
+        return [p for p in config_parameters if p["key"] not in _LEGACY_ALIAS_MIGRATION_KEYS]
+    return config_parameters
+
+
+# Default addresses Odoo (or its demo data) ships with — an audit flags
+# these as "still Odoo default". Sourced from the same check this command
+# replaces (odooly-based, run against real client instances), plus
+# "info@yourcompany.com" added after verifying against a v18 source tree
+# (odoo/addons/base/data/res_users_demo.xml) — that's the value demo data
+# actually writes to the main company partner; ".example.com" never appears
+# there, so a demo-seeded DB would otherwise never trip this flag.
+_MAIL_DEFAULT_COMPANY_EMAILS = frozenset({"info@yourcompany.example.com", "info@yourcompany.com"})
+_MAIL_DEFAULT_SYSTEM_EMAILS = frozenset({
+    "root@yourcompany.example.com",  # demo data
+    "root@example.com",
+    "odoobot@example.com",  # ships in base/data/res_partner_data.xml since 16.0 (verified: a v16
+    # database with mass_mailing uninstalled still carries it)
+})
+_MAIL_DEFAULT_ADMIN_EMAILS = frozenset({"admin@yourcompany.example.com", "admin@example.com"})
+
+
+def _resolve_xmlid(cur: psycopg.Cursor, module: str, name: str) -> int | None:
+    """``res_id`` of a well-known singleton via its external id (``base.main_partner``,
+    ``base.user_root``, ``base.user_admin``, ...) — resolves correctly
+    regardless of a renamed login or a non-default row id, unlike matching
+    on ``login = 'admin'`` or a hardcoded ``res_partner`` id (see
+    ``get_mail_addresses``: both silently drop the row entirely on a
+    database where the login had been renamed — the normal state on
+    odoo.sh — or the row had been deleted, rather than reporting that the
+    lookup came up empty).
+    """
+    cur.execute("SELECT res_id FROM ir_model_data WHERE module = %s AND name = %s", (module, name))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _mail_address_row(partner_id: int | None, label: str, email: str | None, defaults: frozenset[str]) -> dict:
+    # Case-folded: Odoo never normalizes res.partner.email, so an untouched
+    # demo address typed back with capitals (e.g. ADMIN@Yourcompany.example.com)
+    # would otherwise pass the audit.
+    return {
+        "partner_id": partner_id,
+        "label": label,
+        "email": email,
+        "is_default": (email or "").strip().lower() in defaults,
+        # partner_id is None exactly when the xmlid didn't resolve at all,
+        # or resolved to a row that's since been deleted — distinct from a
+        # record that exists with no email set (email: None, missing:
+        # False). Matching on login or a hardcoded company id instead
+        # would either silently drop the row (no admin/system line at all,
+        # read as "no admin problem") or, for the hardcoded company id,
+        # report {"partner_id": 1, "email": None} for a partner that had
+        # been deleted outright — indistinguishable from "exists, blank
+        # email".
+        "missing": partner_id is None,
+    }
+
+
+def get_mail_addresses(cur: psycopg.Cursor) -> list[dict]:
+    """Company/system/admin partner emails, flagged if still Odoo default (never customized).
+
+    Mirrors the addresses a mail-config audit script checked via the ORM API
+    (the main company partner, the OdooBot user, the admin user) — ported to
+    direct SQL since none of it needs auth. Unlike the ORM, raw SQL has no
+    implicit ``active=True`` filter, so OdooBot (archived by design) is found
+    without the API script's explicit ``active=False`` domain, and an
+    archived admin/company record is included too rather than silently
+    disappearing.
+
+    All three are resolved through ``ir_model_data`` (``base.main_partner``/
+    ``base.user_root``/``base.user_admin``, see ``_resolve_xmlid``) rather
+    than a hardcoded ``res_partner`` id or ``login = 'admin'``/``'__system__'``:
+    matching on login silently drops the row entirely once that login has
+    been renamed (the normal state on odoo.sh, where the admin account
+    routinely gets a real customer email as its login), and a hardcoded
+    ``res_partner`` id 1 can't tell "deleted" from "exists with no email".
+    A row that can't be resolved this way — the xmlid is missing, or points
+    at a row that's since been deleted — is still emitted, with
+    ``missing: True`` and ``email: None`` (never silently dropped: "not
+    listed" must not read as "no admin problem").
+
+    Not masked, unlike ``ir_mail_server.smtp_pass``: these are organizational
+    mailboxes (company contact, the OdooBot service account, the admin
+    account), not individual end-user PII — usually already public (e.g. a
+    company's own contact address). Masking them would be friction over
+    data that isn't sensitive.
+    """
+    results: list[dict] = []
+
+    company_id = _resolve_xmlid(cur, "base", "main_partner")
+    email = None
+    if company_id is not None:
+        cur.execute("SELECT email FROM res_partner WHERE id = %s", (company_id,))
+        row = cur.fetchone()
+        if row is None:
+            company_id = None  # xmlid resolved but the partner row is gone -> missing, not "no email"
+        else:
+            email = row[0]
+    results.append(_mail_address_row(company_id, "Company Email", email, _MAIL_DEFAULT_COMPANY_EMAILS))
+
+    for xmlid_name, label, defaults in (
+        ("user_root", "System (OdooBot) Email", _MAIL_DEFAULT_SYSTEM_EMAILS),
+        ("user_admin", "Admin Email", _MAIL_DEFAULT_ADMIN_EMAILS),
+    ):
+        user_id = _resolve_xmlid(cur, "base", xmlid_name)
+        partner_id = user_email = None
+        if user_id is not None:
+            cur.execute(
+                """
+                SELECT ru.partner_id, rp.email
+                FROM res_users ru
+                JOIN res_partner rp ON rp.id = ru.partner_id
+                WHERE ru.id = %s
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                partner_id, user_email = row
+        results.append(_mail_address_row(partner_id, label, user_email, defaults))
+
+    return results
+
+
+def _mail_server_select_sql(cur: psycopg.Cursor) -> str:
+    """Extra SELECT columns for ``ir_mail_server``, version-branched.
+
+    ``smtp_authentication`` (login/certificate/cli) and ``from_filter``
+    (per-server FROM allowlist) both landed in 15.0 — upstream commits
+    ``a4d513034ea8`` and ``1b9dd118cb0f``, neither reachable from 14.0 and
+    both reachable from 15.0, so one probe safely covers both. NULL on
+    14.0 and earlier so every call site unpacks the same 10 columns
+    regardless of version. Probed the same to_regclass/pg_attribute way as
+    ``_groups_category_sql`` — avoids information_schema's bare-name
+    matching across every schema on the search_path.
+    """
+    cur.execute("""
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass('ir_mail_server') AND attname = 'smtp_authentication' AND NOT attisdropped
+    """)
+    if cur.fetchone():
+        return "smtp_authentication, from_filter"
+    return "NULL, NULL"
+
+
+# Well-known SMTP test catchers. A server named/hosted after one of these
+# accepts mail but never relays it anywhere real (by design, so a staging/dev
+# environment can't leak test traffic to real inboxes), which looks identical
+# to a working relay in both the raw data and Odoo's own UI (verified live: a
+# real test send through mailhog landed in its own catch-all, `state='sent'`
+# in Odoo with no error).
+#
+# A match is a hint to verify, not proof: these are product names, and
+# `name` is free text an admin typed. Ambiguous markers are left out rather
+# than guessed at — `papercut` matches Papercut-SMTP (a real catcher) but
+# also PaperCut MF/NG, widely-deployed print-management software; telling an
+# auditor a working relay is a dead end is worse than missing a catcher.
+_TEST_MAIL_CATCHER_MARKERS = frozenset({
+    "mailhog",
+    "mailcatcher",
+    "maildev",
+    "mailpit",
+    "smtp4dev",
+    "inbucket",
+    "mailslurp",
+})
+
+# Hosts that identify a catcher on their own, where a name/token marker
+# can't: Mailtrap runs a sandbox (a catcher) and a real sending service on
+# neighbouring hostnames — sandbox.smtp.mailtrap.io vs live.smtp.mailtrap.io
+# — so "mailtrap" as a substring/token marker would flag real production
+# traffic too.
+_TEST_MAIL_CATCHER_HOSTS = ("sandbox.smtp.mailtrap.io", "ethereal.email")
+
+
+def _is_test_mail_catcher(name: str | None, host: str | None) -> bool:
+    """Whole-token match against `name`/`smtp_host`, case-insensitive.
+
+    Tokens, not substrings: a plain `in` check on the old marker list
+    flagged `maildevices.com` as `maildev`. Separators stay loose (any
+    non-alphanumeric run splits a token), so `mailhog-acme18-staging`
+    still matches on the `mailhog` token.
+    """
+    tokens = set(re.split(r"[^a-z0-9]+", f"{name or ''} {host or ''}".lower()))
+    if tokens & _TEST_MAIL_CATCHER_MARKERS:
+        return True
+    lowered_host = (host or "").lower()
+    return any(known in lowered_host for known in _TEST_MAIL_CATCHER_HOSTS)
+
+
+# The positive counterpart to _TEST_MAIL_CATCHER_MARKERS/_HOSTS: (label,
+# exact hosts, suffixes, allowed ports) for well-known managed relays, so a
+# match is a real production signal rather than just "not flagged as a test
+# catcher" (an absence, not a confirmation). `ports=None` means the host
+# alone is already distinctive enough (a dedicated per-provider hostname,
+# unlike a generic SMTP port reused everywhere).
+#
+# Data, not predicates: every entry here is either an exact-host or a
+# suffix check, so a lookup table expresses it directly and adding a
+# provider is a one-line change.
+_KNOWN_PRODUCTION_RELAYS: tuple[tuple[str, frozenset[str], tuple[str, ...], frozenset[int] | None], ...] = (
+    # Google documents ports 25, 465 and 587 for both hosts (an earlier
+    # version of this table required 587/465 respectively — wrong, missed
+    # smtp.gmail.com:587 with STARTTLS, the most common Odoo setup on Gmail).
+    ("Google Workspace SMTP relay", frozenset({"smtp-relay.gmail.com"}), (), frozenset({25, 465, 587})),
+    ("Gmail SMTP", frozenset({"smtp.gmail.com"}), (), frozenset({25, 465, 587})),
+    # Per-tenant subdomain (direct send / relay connector), documented port 25.
+    ("Microsoft 365", frozenset(), (".mail.protection.outlook.com",), frozenset({25})),
+    # SMTP AUTH client submission: the usual Odoo-on-M365 setup, since it needs
+    # no Exchange-side connector, just a mailbox user/password mapped onto
+    # smtp_user/smtp_pass. Different hosts, so a separate entry rather than
+    # widening the one above — loosening its ports to None would drop the
+    # port-25 constraint that keeps the per-tenant suffix match honest.
+    ("Microsoft 365", frozenset({"smtp.office365.com", "smtp-mail.outlook.com"}), (), None),
+    # Brevo (renamed from Sendinblue); the old host still resolves.
+    ("Brevo (ex-Sendinblue)", frozenset({"smtp-relay.brevo.com", "smtp-relay.sendinblue.com"}), (), None),
+    ("Mandrill", frozenset({"smtp.mandrillapp.com"}), (), None),
+    ("OVH", frozenset({"ssl0.ovh.net"}), (), None),
+    ("Mailjet", frozenset(), (".mailjet.com",), None),
+    ("SendGrid", frozenset({"smtp.sendgrid.net"}), (), None),
+    ("Mailgun", frozenset({"smtp.mailgun.org", "smtp.eu.mailgun.org"}), (), None),
+    ("Postmark", frozenset({"smtp.postmarkapp.com"}), (), None),
+)
+
+# email-smtp.<region>.amazonaws.com — a pattern, not a fixed host, so it
+# needs its own check rather than a table row; anchored so an unrelated
+# *.amazonaws.com host isn't reported as SES.
+_AWS_SES_HOST_RE = re.compile(r"^email-smtp\.[a-z0-9-]+\.amazonaws\.com$")
+
+
+def _known_production_relay(host: str | None, port: int | None) -> str | None:
+    """Label for a well-known managed relay, or `None`.
+
+    `None` means "not recognised", never "not a real relay" — this is a
+    positive-confirmation signal, not the inverse of `is_test_catcher`.
+    Suffix checks require a leading `.` — a bare
+    `endswith("mailjet.com")`/`endswith("mail.protection.outlook.com")`
+    would match lookalike domains like `notmailjet.com` and
+    `evilmail.protection.outlook.com`.
+    """
+    lowered = (host or "").strip().lower().rstrip(".")
+    if not lowered:
+        return None
+    if _AWS_SES_HOST_RE.match(lowered):
+        return "Amazon SES"
+    for label, exact_hosts, suffixes, ports in _KNOWN_PRODUCTION_RELAYS:
+        if lowered not in exact_hosts and not any(lowered.endswith(suffix) for suffix in suffixes):
+            continue
+        if ports is None or port in ports:
+            return label
+    return None
+
+
+# base/data/neutralize.sql (identical 16.0-19.0, absent on 14.0) inserts
+# exactly this row — name and host both hardcoded in Odoo core — after
+# disabling every pre-existing relay (see get_is_neutralized). Caught in
+# review: without this, a neutralized database (every odoo.sh staging
+# build) shows the stub as an ordinary active relay and the real relay as
+# inactive with no explanation, which reads exactly like a broken/disabled
+# relay rather than an intentional neutralization side effect.
+_NEUTRALIZATION_STUB_NAME = "neutralization - disable emails"
+_NEUTRALIZATION_STUB_HOST = "invalid"
+
+
+def _is_neutralization_stub_mail_server(name: str | None, host: str | None) -> bool:
+    return (name or "").strip().lower() == _NEUTRALIZATION_STUB_NAME and (
+        host or ""
+    ).strip().lower() == _NEUTRALIZATION_STUB_HOST
+
+
+def get_mail_servers(cur: psycopg.Cursor, *, reveal: bool = False) -> list[dict]:
+    """Outgoing SMTP relays (``ir.mail_server``), ordered by priority (sequence).
+
+    ``smtp_user``/``smtp_pass`` are masked like any other secret
+    (``_SECRET_MASK``) unless ``reveal`` is set — the original script
+    printed both in cleartext, which this tool's existing secret-masking
+    convention (see ``get_config_parameters``) deliberately does not repeat
+    by default. Both, not just the password: the SMTP username is a
+    credential too (may itself be a real mailbox address), unlike the
+    organizational addresses in ``get_mail_addresses`` which aren't masked
+    at all.
+
+    ``is_test_catcher`` (see ``_is_test_mail_catcher``) flags a row whose
+    name/host names a known test-mail catcher — the audit's answer to "why
+    doesn't this email arrive", without requiring the reader to already
+    know what that tool is. ``known_production_relay`` (see
+    ``_known_production_relay``) is its positive counterpart: a label when
+    host+port match a well-known managed relay (Google, Microsoft 365) —
+    a real confirmation signal, not just the absence of the other flag.
+
+    ``is_neutralization_stub`` (see ``_is_neutralization_stub_mail_server``)
+    flags Odoo core's own db_neutralize placeholder row — the single most
+    common reason mail never leaves an Odoo database, and not a test
+    catcher at all (see ``get_is_neutralized`` for the accompanying
+    top-level flag).
+    """
+    extra_sql = _mail_server_select_sql(cur)
+    # extra_sql is one of the two fixed literal strings returned by
+    # _mail_server_select_sql above — never user or row data, so the f-string
+    # is safe. ty wants a LiteralString, which a dynamically-built (but still
+    # internally-fixed) query string can never satisfy.
+    cur.execute(f"""
+        SELECT sequence, name, smtp_host, smtp_port, smtp_user, smtp_pass, smtp_encryption, active, {extra_sql}
+        FROM ir_mail_server
+        ORDER BY sequence, name
+    """)  # noqa: S608  # ty: ignore[no-matching-overload]
+    rows: list[dict] = []
+    for seq, name, host, port, user, pwd, encryption, active, authentication, from_filter in cur.fetchall():
+        rows.append({
+            "sequence": seq,
+            "name": name,
+            "smtp_host": host,
+            "smtp_port": port,
+            "smtp_user": user if (reveal or not user) else _SECRET_MASK,
+            "smtp_pass": pwd if (reveal or not pwd) else _SECRET_MASK,
+            "smtp_encryption": encryption,
+            "smtp_authentication": authentication,
+            "from_filter": from_filter,
+            "active": bool(active),
+            "is_test_catcher": _is_test_mail_catcher(name, host),
+            "known_production_relay": _known_production_relay(host, port),
+            "is_neutralization_stub": _is_neutralization_stub_mail_server(name, host),
+        })
+    return rows
+
+
+def get_mail_relevant_modules(cur: psycopg.Cursor) -> list[dict]:
+    """State of modules that materially change mail behavior (currently: ``mass_mailing``)."""
+    cur.execute(
+        "SELECT name, state FROM ir_module_module WHERE name = ANY(%s) ORDER BY name",
+        (["mass_mailing"],),
+    )
+    return [{"name": r[0], "state": r[1]} for r in cur.fetchall()]
+
+
+def _mail_alias_local_email(local_part: str | None, domain_name: str | None) -> str | None:
+    """Mirrors ``AliasDomain._compute_bounce_email``/``_compute_catchall_email``: always `local@domain`."""
+    if not local_part or not domain_name:
+        return None
+    return f"{local_part}@{domain_name}"
+
+
+def _mail_alias_default_from_email(default_from: str | None, domain_name: str | None) -> str | None:
+    """Mirrors ``AliasDomain._compute_default_from_email``: keep as-is if already a full address."""
+    if not default_from:
+        return None
+    if "@" in default_from:
+        return default_from
+    if not domain_name:
+        return None
+    return f"{default_from}@{domain_name}"
+
+
+def get_mail_alias_domains(cur: psycopg.Cursor) -> list[dict] | None:
+    """Per-company ``mail.alias.domain``, the *actual* runtime source (Odoo 17+)
+    for catchall/bounce/default-from — supersedes the ``mail.catchall.domain``
+    / ``mail.bounce.alias`` / ``mail.catchall.alias`` / ``mail.default.from``
+    ``ir_config_parameter`` keys in ``get_mail_config_parameters``.
+
+    Odoo's own model docstring says it plainly: "This replaces
+    ``mail.alias.domain`` configuration parameter use until v16"
+    (``odoo/addons/mail/models/mail_alias_domain.py``). Past v16, those ICP
+    keys are read only by ``AliasDomain._migrate_icp_to_domain`` — a one-time
+    compatibility helper for installing ``mail`` after ``base`` was already
+    configured (e.g. the odoo.sh flow) — and are otherwise vestigial: a value
+    sitting there does not mean Odoo is actually using it to route bounces or
+    replies. Verified by grepping an Odoo 18 community + enterprise source
+    tree: no runtime code in ``mail`` reads ``mail.catchall.domain``/
+    ``mail.bounce.alias``/``mail.catchall.alias`` by key outside that
+    migration helper — OCA or custom modules may still read
+    ``mail.catchall.domain`` directly, so this doesn't generalize past core.
+
+    Returns ``None`` if ``mail_alias_domain`` doesn't exist (pre-17, or the
+    ``mail`` app not installed at all) — ``get_mail_config_parameters`` is
+    then the only signal available, same as pre-17 in reality.
+
+    A company with ``alias_domain_id IS NULL`` has *no* alias domain assigned
+    — bounces/replies for that company aren't routed anywhere — but this is
+    **not** on its own a misconfiguration: it's also the documented state of
+    a clean 17+ install that never had v16-style ICP config to migrate
+    (verified across real v17/v18/v19 databases: 4 of 5 with ``mail``
+    installed have zero ``mail_alias_domain`` rows, all clean installs).
+    Surfaced as ``alias_domain: None`` rather than silently omitted either
+    way; ``_is_alias_domain_migration_pending`` (see ``get_mail_audit``) is
+    what actually tells a clean or successfully-migrated install apart
+    from a genuinely stuck one — a leftover ICP value alone
+    (``_is_legacy_mail_config_configured``) does not, since
+    ``_migrate_icp_to_domain`` never clears those keys even when it
+    succeeds.
+
+    Filters ``res_company.active = true`` — unlike ``get_mail_addresses``
+    (where seeing past the ORM's implicit filter is the point), an archived
+    company isn't sending real mail, so counting it here would just add
+    false-positive noise to ``odoo_db_mail_companies_missing_alias_domain``.
+    Same rationale ``get_groups(include_users=True)`` uses for filtering
+    ``u.active = true`` on membership rows.
+    """
+    cur.execute("SELECT to_regclass('public.mail_alias_domain')")
+    if not _fetch_one(cur)[0]:
+        return None
+
+    cur.execute("""
+        SELECT c.id, c.name, mad.id, mad.name, mad.bounce_alias, mad.catchall_alias, mad.default_from
+        FROM res_company c
+        LEFT JOIN mail_alias_domain mad ON mad.id = c.alias_domain_id
+        WHERE c.active = true
+        ORDER BY c.id
+    """)
+    rows: list[dict] = []
+    for company_id, company_name, domain_id, domain_name, bounce_alias, catchall_alias, default_from in cur.fetchall():
+        rows.append({
+            "company_id": company_id,
+            "company_name": company_name,
+            "alias_domain_id": domain_id,
+            "alias_domain": domain_name,
+            "bounce_email": _mail_alias_local_email(bounce_alias, domain_name),
+            "catchall_email": _mail_alias_local_email(catchall_alias, domain_name),
+            "default_from_email": _mail_alias_default_from_email(default_from, domain_name),
+        })
+    return rows
+
+
+def get_mail_audit(cur: psycopg.Cursor, *, reveal: bool = False) -> dict:
+    """Audit bundle for outbound mail configuration.
+
+    Ported from a script that gathered the same data through the ORM API
+    (odooly client) — none of it needs auth, so direct SQL replaces it,
+    picking up raw-SQL's usual side benefit of seeing past the ORM's implicit
+    ``active=True`` filter (see ``get_mail_addresses``). ``alias_domains``
+    (Odoo 17+) is the authoritative counterpart to ``config_parameters`` —
+    see ``get_mail_alias_domains`` for why both are kept rather than one
+    replacing the other. ``reveal`` now only affects ``mail_servers``
+    (``smtp_pass`` is a real credential) — ``addresses`` are organizational
+    mailboxes, not masked regardless (see ``get_mail_addresses``).
+
+    ``is_neutralized`` (see ``get_is_neutralized``) is the single most
+    common reason mail never leaves an Odoo database — every odoo.sh
+    staging build looks like this — read the same way ``odoo-db list``
+    already reads the same ``database.is_neutralized`` key.
+
+    ``is_legacy_mail_config_configured``/``is_alias_domain_migration_pending``
+    (see ``_is_legacy_mail_config_configured``/
+    ``_is_alias_domain_migration_pending``) together let a caller tell a
+    clean 17+ install, a successfully migrated one, and a genuinely stuck
+    v16-to-17 upgrade apart — all three otherwise look identical as just
+    ``alias_domain_id IS NULL`` (the first two) or a leftover ICP value
+    (the last two) taken alone.
+
+    ``config_parameters`` here is always the full 6-key list — unlike
+    ``odoo-db mail``'s own text output, which drops the 4 legacy ICP keys
+    once ``is_alias_domain_migration_pending`` says they're no longer
+    relevant (see ``_relevant_mail_config_parameters``, called from
+    ``main.py``, not here). Kept complete in this dict deliberately: this
+    is also what ``--output-format json`` returns, and this tool's main
+    job is v16-to-v19 migration audits — comparing that JSON across
+    versions, a leftover ``mail.catchall.domain`` present in one and
+    silently dropped from the other would be indistinguishable from
+    "never existed". Whether to hide an always-empty key is a
+    presentation call for a human reading text/TUI output, not something
+    the machine-readable artifact should also make.
+    """
+    config_parameters = get_mail_config_parameters(cur)
+    alias_domains = get_mail_alias_domains(cur)
+    legacy_configured = _is_legacy_mail_config_configured(config_parameters)
+    migration_pending = _is_alias_domain_migration_pending(alias_domains, legacy_configured=legacy_configured)
+
+    return {
+        "is_neutralized": get_is_neutralized(cur),
+        "config_parameters": config_parameters,
+        "is_legacy_mail_config_configured": legacy_configured,
+        "is_alias_domain_migration_pending": migration_pending,
+        "alias_domains": alias_domains,
+        "addresses": get_mail_addresses(cur),
+        "mail_servers": get_mail_servers(cur, reveal=reveal),
+        "modules": get_mail_relevant_modules(cur),
+    }
 
 
 # Per-row overhead used by the statistical bloat estimate. Deliberately
