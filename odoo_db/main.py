@@ -324,6 +324,237 @@ def params(
 
 
 # ---------------------------------------------------------------------------
+# mail
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def mail(db_name: Annotated[str, typer.Argument(metavar="DB")]):
+    """Audit outbound mail configuration: config keys, alias domains, addresses, relays, mass_mailing.
+
+    Ports a script that checked the same things through the Odoo API
+    (odooly) to direct SQL — none of this data needs auth. Company/system
+    (OdooBot)/admin email addresses are organizational mailboxes, not
+    individual PII, so they're shown as-is; `ir_mail_server.smtp_user`/
+    `smtp_pass` are real credentials and stay masked — pass the global
+    --include-sensitive-information to reveal them.
+
+    On Odoo 17+, four of the config parameters above —
+    `mail.catchall.domain`/`mail.bounce.alias`/`mail.catchall.alias`/
+    `mail.default.from` — are legacy (read only by a one-time migration
+    helper) and shown alongside the per-company `mail.alias.domain` records
+    that actually control bounce/catchall/default-from routing now.
+    `mail.default.from_filter` is not part of that migration and stays
+    live at runtime on 17.0-19.0 (`IrMailServer._get_default_from_filter`).
+
+    Flags a neutralized database (`database.is_neutralized`, set by
+    `base/data/neutralize.sql` on 16.0-19.0) up front — the single most
+    common reason mail never leaves an Odoo database — and marks the
+    stub relay it inserts (`is_neutralization_stub`) so it isn't mistaken
+    for a real, working server.
+    """
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        data = db.get_mail_audit(cur, reveal=_include_sensitive)
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(data)
+        elif w.fmt == "prometheus":
+            # Gauges count active rows only, like every other command's: an
+            # archived relay relays nothing, so counting it moves alert
+            # thresholds without anything having changed (AGENTS.md: "gauges
+            # keep counting installed/active rows only, so alert thresholds
+            # don't move").
+            default_count = sum(1 for a in data["addresses"] if a["is_default"])
+            # The neutralization stub is active=true by design (Odoo inserts it
+            # that way) but isn't a real relay, so it's excluded here too — a
+            # neutralized database should read 0 active servers, not 1.
+            active_servers = sum(1 for m in data["mail_servers"] if m["active"] and not m["is_neutralization_stub"])
+            test_catcher_count = sum(1 for m in data["mail_servers"] if m["is_test_catcher"] and m["active"])
+            known_relay_count = sum(1 for m in data["mail_servers"] if m["known_production_relay"] and m["active"])
+            lines = [
+                "# HELP odoo_db_mail_neutralized Whether database.is_neutralized is set",
+                "# TYPE odoo_db_mail_neutralized gauge",
+                f'odoo_db_mail_neutralized{{db="{db_name}"}} {int(data["is_neutralized"])}',
+                "# HELP odoo_db_mail_servers Active outgoing SMTP relay count",
+                "# TYPE odoo_db_mail_servers gauge",
+                f'odoo_db_mail_servers{{db="{db_name}"}} {active_servers}',
+                "# HELP odoo_db_mail_default_addresses Company/system/admin addresses still at Odoo default",
+                "# TYPE odoo_db_mail_default_addresses gauge",
+                f'odoo_db_mail_default_addresses{{db="{db_name}"}} {default_count}',
+                "# HELP odoo_db_mail_test_catcher_servers Active outgoing relays that are known test mail catchers",
+                "# TYPE odoo_db_mail_test_catcher_servers gauge",
+                f'odoo_db_mail_test_catcher_servers{{db="{db_name}"}} {test_catcher_count}',
+                "# HELP odoo_db_mail_known_production_relay_servers "
+                "Active outgoing relays matching a known managed relay",
+                "# TYPE odoo_db_mail_known_production_relay_servers gauge",
+                f'odoo_db_mail_known_production_relay_servers{{db="{db_name}"}} {known_relay_count}',
+            ]
+            if data["alias_domains"] is not None:
+                # alias_domain_id IS NULL alone is the documented, expected
+                # state of a clean 17+ install with mail installed but never
+                # configured — not a misconfiguration, and true for most
+                # real databases (the same "flags nearly everything" trap
+                # AGENTS.md documents for role-drift's extra_groups). Only
+                # count companies at all when a migration is genuinely
+                # still pending -- a leftover legacy ICP value on its own
+                # is also the permanent state of a database that migrated
+                # fine, not evidence of anything broken.
+                missing = (
+                    sum(1 for a in data["alias_domains"] if a["alias_domain_id"] is None)
+                    if data["is_alias_domain_migration_pending"]
+                    else 0
+                )
+                lines += [
+                    "# HELP odoo_db_mail_companies_missing_alias_domain "
+                    "Companies with no mail.alias.domain assigned despite legacy ICP mail config still set "
+                    "(Odoo 17+, a stuck v16-to-17 migration)",
+                    "# TYPE odoo_db_mail_companies_missing_alias_domain gauge",
+                    f'odoo_db_mail_companies_missing_alias_domain{{db="{db_name}"}} {missing}',
+                ]
+            w.prometheus(lines)
+        else:
+            if data["is_neutralized"]:
+                w.text(
+                    "DATABASE IS NEUTRALIZED (database.is_neutralized=true): outgoing mail is disabled by "
+                    "an Odoo-inserted stub relay (see below) — any other relay listed as inactive was "
+                    "disabled by neutralization, not misconfiguration.\n"
+                )
+
+            # Filtered for this text table only -- data["config_parameters"]
+            # itself (also what --output-format json returns) always keeps
+            # the full 6-key list, since a migration audit comparing that
+            # JSON across versions needs a leftover key to stay visible
+            # even once it's no longer relevant (see get_mail_audit).
+            relevant_config_parameters = db._relevant_mail_config_parameters(
+                data["config_parameters"],
+                alias_domains=data["alias_domains"],
+                migration_pending=data["is_alias_domain_migration_pending"],
+            )
+            w.text("Config parameters:")
+            w.table(
+                ["key", "value"],
+                [
+                    [
+                        c["key"] + (f" ({c['explanation']})" if c["explanation"] else ""),
+                        "(not defined)" if c["value"] is None else c["value"],
+                    ]
+                    for c in relevant_config_parameters
+                ],
+            )
+
+            if data["alias_domains"] is not None:
+                if data["is_alias_domain_migration_pending"]:
+                    w.text(
+                        "\nNote: since Odoo 17, mail.catchall.domain/mail.bounce.alias/mail.catchall.alias/"
+                        "mail.default.from above are legacy (read only by a one-time migration helper) — Odoo "
+                        "actually routes bounces/catchall/default-from per company via the alias domain below, "
+                        "and at least one company here has none, so that migration hasn't finished."
+                    )
+                else:
+                    w.text(
+                        "\nNote: the pre-17 mail.catchall.domain/mail.bounce.alias/mail.catchall.alias/"
+                        "mail.default.from keys aren't shown above: they can no longer affect routing on this "
+                        "database. Odoo routes bounces/catchall/default-from per company via the alias domain "
+                        "below."
+                    )
+                w.text("\nAlias domains (Odoo 17+, authoritative):")
+                w.table(
+                    ["company", "alias_domain", "bounce_email", "catchall_email", "default_from_email"],
+                    [
+                        [
+                            a["company_name"],
+                            a["alias_domain"]
+                            or (
+                                "NOT SET despite legacy ICP config still present — stuck v16-to-17 migration!"
+                                if data["is_legacy_mail_config_configured"]
+                                else "(not set — normal for a clean 17+ install)"
+                            ),
+                            a["bounce_email"] or "",
+                            a["catchall_email"] or "",
+                            a["default_from_email"] or "",
+                        ]
+                        for a in data["alias_domains"]
+                    ],
+                )
+
+            w.text("\nRelevant addresses:")
+            rows = []
+            for a in data["addresses"]:
+                if a["missing"]:
+                    email = "(record missing)"
+                else:
+                    email = "(not set)" if a["email"] is None else a["email"]
+                    if a["is_default"]:
+                        email += "  [WARNING: still Odoo default — update it]"
+                partner_id = "" if a["partner_id"] is None else str(a["partner_id"])
+                rows.append([partner_id, a["label"], email])
+            w.table(["partner_id", "label", "email"], rows)
+
+            w.text("\nOutgoing mail servers:")
+            if data["mail_servers"]:
+                # 7 columns, not 9: user+password are both masked by
+                # default, so between them they carried one bit ("is
+                # something set") at the cost of the two widest cells —
+                # host, the column an audit is actually for. encryption/auth are
+                # one concept, collapsed the same way. Full values
+                # (revealed or not) stay in the json output.
+                w.table(
+                    ["seq", "name", "host:port", "creds", "encryption/auth", "from_filter", "active"],
+                    [
+                        [
+                            str(m["sequence"]) if m["sequence"] is not None else "",
+                            m["name"],
+                            f"{m['smtp_host'] or ''}:{m['smtp_port'] if m['smtp_port'] is not None else ''}",
+                            "/".join(filter(None, (m["smtp_user"], m["smtp_pass"])))
+                            if _include_sensitive
+                            else ("set" if (m["smtp_user"] or m["smtp_pass"]) else "-"),
+                            " / ".join(filter(None, (m["smtp_encryption"], m["smtp_authentication"]))),
+                            m["from_filter"] or "",
+                            "yes" if m["active"] else "no",
+                        ]
+                        for m in data["mail_servers"]
+                    ],
+                    fold=frozenset({"host:port", "creds"}),
+                )
+                # Named, not "servers": with several relays on one database,
+                # a bare "[TEST CATCHER] servers accept mail..." forces the
+                # reader to guess which row it means. Archived (active=False)
+                # relays are excluded — they swallow
+                # nothing, so flagging one reads as a false alarm. Deduped
+                # (`sorted(set(...))`): two relays at the same known
+                # provider would otherwise repeat its name once per row.
+                catchers = sorted({m["name"] for m in data["mail_servers"] if m["is_test_catcher"] and m["active"]})
+                if catchers:
+                    w.text(
+                        f"  WARNING: {', '.join(catchers)} — test-mail catcher(s): accept mail but never relay "
+                        "it anywhere real, so a real send never reaches a real inbox from here, by design."
+                    )
+                known_relays = sorted({
+                    m["known_production_relay"]
+                    for m in data["mail_servers"]
+                    if m["known_production_relay"] and m["active"]
+                })
+                if known_relays:
+                    w.text(f"  [KNOWN RELAY] confirmed against: {', '.join(known_relays)} — a real managed relay.")
+                stubs = sorted({m["name"] for m in data["mail_servers"] if m["is_neutralization_stub"]})
+                if stubs:
+                    w.text(
+                        f"  [NEUTRALIZATION STUB] {', '.join(stubs)} — Odoo's own db_neutralize placeholder, "
+                        "not a real relay, and not the cause of mail failing on its own."
+                    )
+            else:
+                w.text("  (none defined: odoo will use localhost:25)")
+
+            w.text("\nRelevant modules:")
+            w.table(
+                ["module", "state"],
+                [[m["name"], m["state"]] for m in data["modules"]],
+                empty_msg="  (none of the tracked modules found)",
+            )
+
+
+# ---------------------------------------------------------------------------
 # jobs
 # ---------------------------------------------------------------------------
 

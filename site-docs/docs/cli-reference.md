@@ -36,6 +36,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `modules`: List modules with version for a database.
 * `crons`: List scheduled actions for a database.
 * `params`: Show ir_config_parameter keys and values...
+* `mail`: Audit outbound mail configuration: config...
 * `jobs`: List queue job counts by state for a...
 * `users`: List users for a database.
 * `groups`: List res.groups for a database.
@@ -127,6 +128,45 @@ $ odoo-db params [OPTIONS] DB [PATTERN]
 
 * `DB`: \[required\]
 * `[PATTERN]`: Case-insensitive substring match on key.
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+## `odoo-db mail`
+
+Audit outbound mail configuration: config keys, alias domains, addresses, relays, mass_mailing.
+
+Ports a script that checked the same things through the Odoo API
+(odooly) to direct SQL — none of this data needs auth. Company/system
+(OdooBot)/admin email addresses are organizational mailboxes, not
+individual PII, so they&#x27;re shown as-is; `ir_mail_server.smtp_user`/
+`smtp_pass` are real credentials and stay masked — pass the global
+--include-sensitive-information to reveal them.
+
+On Odoo 17+, four of the config parameters above —
+`mail.catchall.domain`/`mail.bounce.alias`/`mail.catchall.alias`/
+`mail.default.from` — are legacy (read only by a one-time migration
+helper) and shown alongside the per-company `mail.alias.domain` records
+that actually control bounce/catchall/default-from routing now.
+`mail.default.from_filter` is not part of that migration and stays
+live at runtime on 17.0-19.0 (`IrMailServer._get_default_from_filter`).
+
+Flags a neutralized database (`database.is_neutralized`, set by
+`base/data/neutralize.sql` on 16.0-19.0) up front — the single most
+common reason mail never leaves an Odoo database — and marks the
+stub relay it inserts (`is_neutralization_stub`) so it isn&#x27;t mistaken
+for a real, working server.
+
+**Usage**:
+
+```console
+$ odoo-db mail [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
 
 **Options**:
 
