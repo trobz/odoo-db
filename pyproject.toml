@@ -1,6 +1,6 @@
 [project]
 name = "odoo-db"
-version = "1.20.0"
+version = "1.21.0"
 description = "Odoo databases management CLI tool"
 authors = [{name = "Do Anh Duy", email = "doanhduyxavie@gmail.com"}]
 requires-python = ">=3.10"

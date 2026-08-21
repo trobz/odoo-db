@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.21.0 (2026-08-21)
+
+### Features
+
+- **mail**: Add mail configuration audit command
+  ([`6d23317`](https://github.com/trobz/odoo-db/commit/6d233171087184fc60e07478a16735601f73c0a2))
+
+
 ## v1.20.0 (2026-08-17)
 
 ### Features
