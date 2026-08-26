@@ -1,9 +1,11 @@
 import string
 
+import psycopg
 from typer.testing import CliRunner
 
 from odoo_db.db import (
     _bloat_estimate_pages,
+    _count_rows,
     _groups_category_sql,
     _is_alias_domain_migration_pending,
     _is_legacy_mail_config_configured,
@@ -13,7 +15,9 @@ from odoo_db.db import (
     _relevant_mail_config_parameters,
     _validate_attachment_orphans,
     compute_role_drift,
+    filter_credential_mail_servers,
     filter_online_users,
+    filter_sensitive_parameters,
     generate_password,
     get_config_parameters,
     get_is_neutralized,
@@ -1085,3 +1089,149 @@ def test_mime_family():
     assert _mime_family(None) == "unknown"
     assert _mime_family("") == "unknown"
     assert _mime_family("application/octet-stream") == "other"
+
+
+def test_check_sensitive_information_help():
+    result = runner.invoke(app, ["check-sensitive-information", "--help"])
+    assert result.exit_code == 0
+
+
+def test_filter_sensitive_parameters_drops_booleans_and_masks():
+    """`auth_signup.reset_password` is a checkbox, not a password -- masking
+    it costs nothing (what `params` does), but listing it in a report whose
+    whole purpose is naming the secrets costs the reader's trust in every
+    other row. Nothing wider than a boolean literal is dropped: a short
+    numeric value is how a real 4-digit credential would go missing."""
+    rows = [
+        ("auth_signup.reset_password", "True"),
+        ("database.secret", "9150e176-fa5a"),
+        ("web.base.url", "http://localhost:8069"),
+        ("vendor.api_key", "sk_live_abc123"),
+        ("bkav.unique_key", "3208"),
+        ("empty.token", ""),
+    ]
+
+    assert [(r["key"], r["value"], r["marker"]) for r in filter_sensitive_parameters(rows)] == [
+        ("database.secret", "********", "secret"),
+        ("vendor.api_key", "********", "api_key"),
+        ("bkav.unique_key", "********", "key"),
+    ]
+
+    revealed = filter_sensitive_parameters(rows, reveal=True)
+    assert [r["value"] for r in revealed] == ["9150e176-fa5a", "sk_live_abc123", "3208"]
+
+
+def test_filter_sensitive_parameters_drops_allowlisted_core_keys():
+    """`auth_password_policy.minlength` is a policy number that says
+    "password" -- seen on a real database, and exactly the noise the boolean
+    drop exists to prevent. Dropping it by value shape would take a 4-digit
+    credential with it, so it is named instead."""
+    rows = [("auth_password_policy.minlength", "8"), ("vendor.api_key", "sk_live_abc123")]
+
+    assert [r["key"] for r in filter_sensitive_parameters(rows)] == ["vendor.api_key"]
+
+
+def test_filter_sensitive_parameters_drops_keys_that_are_public_by_design():
+    """The `_key` suffix hides that core hands some of these to the browser
+    itself: `ir_http.py` puts the turnstile site key and the recaptcha public
+    key in the session payload, and a VAPID public key is published with the
+    push subscription. Each one's secret sibling must survive the drop --
+    that pairing is what makes the allowlist safe to widen."""
+    rows = [
+        ("cf.turnstile_site_key", "0x4AAA"),
+        ("cf.turnstile_secret_key", "0x4AAA-secret"),
+        ("recaptcha_public_key", "6Lc-PUBLIC"),
+        ("recaptcha_private_key", "6Lc-PRIVATE"),
+        ("mail.web_push_vapid_public_key", "BPub"),
+        ("mail.web_push_vapid_private_key", "BPriv"),
+        ("microsoft_account.token_endpoint", "https://login.microsoftonline.com/x/token"),
+    ]
+
+    assert [r["key"] for r in filter_sensitive_parameters(rows)] == [
+        "cf.turnstile_secret_key",
+        "recaptcha_private_key",
+        "mail.web_push_vapid_private_key",
+    ]
+
+
+def _server(name, host, *, user=None, credential=None, active=True, stub=False, catcher=False, relay=None):
+    return {
+        "name": name,
+        "smtp_host": host,
+        "smtp_port": 587,
+        "smtp_user": user,
+        "smtp_pass": credential,
+        "active": active,
+        "known_production_relay": relay,
+        "is_neutralization_stub": stub,
+        "is_test_catcher": catcher,
+    }
+
+
+def test_filter_credential_mail_servers_keeps_archived_rows():
+    """An archived relay cannot send anything -- the `mail` audit is right to
+    exclude it from its active counts -- but its stored password ships in the
+    dump all the same, which is this command's whole question. The stub and
+    the catchers go: neither has a credential to leak."""
+    servers = [
+        _server("Gmail relay", "smtp.gmail.com", user="ops@acme.com", credential="realpass"),
+        _server("old relay", "smtp.legacy.com", user="old@acme.com", credential="oldpass", active=False),
+        _server("neutralization - disable emails", "invalid", stub=True),
+        _server("mailhog", "mailhog", catcher=True),
+        _server("no credentials", "smtp.acme.com"),
+    ]
+
+    kept = filter_credential_mail_servers(servers)
+
+    assert [(r["name"], r["active"], r["has_password"]) for r in kept] == [
+        ("Gmail relay", True, True),
+        ("old relay", False, True),
+    ]
+
+
+def test_filter_credential_mail_servers_keeps_credentialless_production_relay():
+    """A production relay authenticating by IP allowlist or `from_filter`
+    stores neither user nor password, so "no credential" is not "no
+    production config" -- the host is the finding, and a copy pointed at it
+    is one cron away from mailing real customers. A credential-less host
+    matching nothing known is still dropped."""
+    servers = [
+        _server("prod relay", "smtp.gmail.com", relay="Gmail SMTP"),
+        _server("internal", "smtp.internal.acme.com"),
+    ]
+
+    assert [r["name"] for r in filter_credential_mail_servers(servers)] == ["prod relay"]
+
+
+class _FakeCountCursor:
+    """Answers `count(*)` for one table and raises for another, recording the
+    savepoint traffic -- postgres aborts the whole transaction on a failed
+    statement, so the recovery is the thing worth pinning."""
+
+    def __init__(self, unreadable: str):
+        self._unreadable = unreadable
+        self.statements: list[str] = []
+
+    def execute(self, query, params=None):
+        text = query.as_string(None) if hasattr(query, "as_string") else str(query)
+        self.statements.append(text)
+        if "count(*)" in text and self._unreadable in text:
+            raise psycopg.errors.InsufficientPrivilege
+
+    def fetchone(self):
+        return (7,)
+
+
+def test_count_rows_survives_a_table_it_cannot_read():
+    """One table the role has no SELECT on must not take down the two
+    sections already gathered: postgres aborts the transaction on the failed
+    statement, so without the savepoint every later query fails too and a
+    partial answer becomes no answer."""
+    cur = _FakeCountCursor("x_locked")
+
+    assert _count_rows(cur, "x_readable") == 7  # ty: ignore[invalid-argument-type]
+    assert _count_rows(cur, "x_locked") is None  # ty: ignore[invalid-argument-type]
+
+    assert cur.statements.count("SAVEPOINT sensitive_count") == 2
+    assert cur.statements.count("RELEASE SAVEPOINT sensitive_count") == 1
+    assert cur.statements.count("ROLLBACK TO SAVEPOINT sensitive_count") == 1

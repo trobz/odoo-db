@@ -47,6 +47,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `bloat`: Estimate table + index bloat (reclaimable...
 * `attachments`: Audit ir.attachment storage: repartition +...
 * `studio`: Show Studio customizations: custom models,...
+* `check-sensitive-information`: Surface secrets a database still carries:...
 * `not-odoo`: Show non-Odoo database objects: custom...
 * `prepare-audit`: Combine summary + modules + stats +...
 * `dump`: Dump an Odoo database using pg_dump custom...
@@ -368,6 +369,35 @@ Show Studio customizations: custom models, extended models, studio-flagged recor
 
 ```console
 $ odoo-db studio [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+## `odoo-db check-sensitive-information`
+
+Surface secrets a database still carries: config keys, mail relay credentials, custom credential tables.
+
+The question to answer before a dump leaves the building, and the one
+neutralizing a copy does *not* answer: `neutralize` clears what a
+database can still do, and only for modules that ship a neutralize.sql
+— a client&#x27;s own module never does, so its API keys survive intact.
+
+Values are masked by default; pass the global
+--include-sensitive-information to reveal them. Detection is by name
+(`_is_sensitive_key`, `_SENSITIVE_TABLE_MARKERS`) and best-effort in
+both directions: a credential in a table named nothing like one is not
+found, and a hit is a candidate to read, not a verdict.
+
+**Usage**:
+
+```console
+$ odoo-db check-sensitive-information [OPTIONS] DB
 ```
 
 **Arguments**:

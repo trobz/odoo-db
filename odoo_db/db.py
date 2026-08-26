@@ -3019,6 +3019,227 @@ def get_locks(cur: psycopg.Cursor, dbname: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# sensitive information
+# ---------------------------------------------------------------------------
+
+# Table-name markers for objects a custom module is likely to have parked
+# credentials in. Wildcarded on both sides deliberately: a custom module
+# prefixes its tables (`x_api_config`, `trobz_api_instance`), so anchoring
+# these would match almost nothing on a real database.
+#
+# Kept separate from _SENSITIVE_KEY_MARKERS, which describes
+# ir_config_parameter *keys*: overlapping the two would drag in every
+# `res_users.password` and `*_token` column Odoo core ships, burying the
+# handful of rows a reviewer can act on. The markers here name integration
+# tables, which core has none of -- so a match is nearly always custom.
+_SENSITIVE_TABLE_MARKERS = ("api_key", "api_config", "api_instance", "api_url")
+
+
+# `auth_signup.reset_password` is a checkbox, not a password -- and
+# `_is_sensitive_key` matches it on the substring, as it should for masking
+# (masking a boolean costs nothing). In a report whose whole purpose is to
+# list the secrets, a false positive costs the reader's trust in the other
+# rows, so a value that is only a boolean literal is dropped. Nothing wider:
+# a short numeric value (`...duration = 90`) stays, since dropping by shape
+# is how a real 4-digit credential would go missing.
+_BOOLEAN_VALUES = frozenset(("true", "false", "0", "1"))
+
+# Core keys `_is_sensitive_key` matches on a substring while holding no
+# secret at all -- `auth_password_policy.minlength` is a policy number that
+# says "password". Dropping them by *value shape* was rejected above (a
+# 4-digit credential looks the same), so they are named instead: an exact
+# key allowlist can only ever hide the key it names, and each entry is a
+# core key whose meaning is fixed. A custom module's key never lands here.
+#
+# The second group is public *by design*, which the `_key` suffix hides:
+# core hands `cf.turnstile_site_key` and `recaptcha_public_key` to the
+# browser itself (`ir_http.py` puts them in the session payload), and the
+# VAPID public key is the half of the pair a push subscription publishes --
+# its `_private_key` sibling is the secret and stays listed. Matched as
+# exact keys rather than a `*_public_key`/`*_site_key` suffix rule for the
+# same reason as above: a rule hides keys nobody has read yet.
+_NON_SECRET_CONFIG_KEYS = frozenset((
+    "auth_password_policy.minlength",
+    "cf.turnstile_site_key",
+    "mail.web_push_vapid_public_key",
+    "recaptcha_public_key",
+    # a URL with a documented default (DEFAULT_MICROSOFT_TOKEN_ENDPOINT),
+    # matched only on the word "token"
+    "microsoft_account.token_endpoint",
+))
+
+
+def _sensitive_marker(name: str) -> str | None:
+    """Which marker flagged `name`, for a reader who has to judge the hit."""
+    lowered = name.lower()
+    for marker in (*_SENSITIVE_KEY_MARKERS, *_SENSITIVE_TABLE_MARKERS):
+        if marker in lowered:
+            return marker
+    return "key" if re.search(r"(^|[._])key$", lowered) else None
+
+
+def get_sensitive_information(cur: psycopg.Cursor, *, reveal: bool = False) -> dict:
+    """What secrets a database still carries — the question to answer before
+    a dump leaves the building, or after a copy has been neutralized.
+
+    Neutralization is the related but different question: it asks what a
+    database can still *do* (mail servers disabled, crons off), while this
+    asks what it still *holds*. A neutralized copy still has every API key
+    its custom modules stored -- `base/data/neutralize.sql` only clears the
+    credentials of modules that ship a neutralize.sql, and a client's own
+    module never does.
+
+    Three sections, each a different way a credential hides:
+
+    - `config_parameters`: `ir_config_parameter` rows whose key looks
+      secret-bearing (`_is_sensitive_key`) *and* actually hold a value. The
+      empty ones are reported nowhere: a key with no value is not a leak,
+      and listing it only pads the report a reviewer has to read.
+    - `mail_servers`: `ir.mail_server` rows carrying real relay
+      credentials. Odoo's own neutralization stub and the known test
+      catchers are excluded -- neither has a credential to leak. Inactive
+      rows are *included*, unlike the `mail` audit's: an archived relay
+      cannot send anything, but its stored password is in the dump all the
+      same.
+    - `candidate_tables`: tables whose name matches
+      `_SENSITIVE_TABLE_MARKERS`, with the row count and which of their
+      columns look secret-bearing. `owner_module` is the module that owns
+      the table (`get_model_owners`), or None when nothing claims it --
+      those are the custom/orphan ones worth reading first.
+
+    Values are masked unless `reveal`, the same rule `get_config_parameters`
+    follows: the point is to say *where* the secrets are, and a report that
+    prints them is itself the thing it warns about.
+    """
+    cur.execute("SELECT key, value FROM ir_config_parameter ORDER BY key")
+    return {
+        "config_parameters": filter_sensitive_parameters(cur.fetchall(), reveal=reveal),
+        "mail_servers": filter_credential_mail_servers(get_mail_servers(cur, reveal=reveal)),
+        "candidate_tables": _sensitive_candidate_tables(cur),
+    }
+
+
+def filter_sensitive_parameters(rows: list[tuple], *, reveal: bool = False) -> list[dict]:
+    """`(key, value)` rows down to the ones that actually hold a secret.
+
+    Pure over the fetched rows so it is unit-testable without a cursor, the
+    same shape `filter_online_users`/`compute_role_drift` use.
+    """
+    return [
+        {"key": key, "value": value if reveal else _SECRET_MASK, "marker": _sensitive_marker(key)}
+        for key, value in rows
+        if value
+        and _is_sensitive_key(key)
+        and key not in _NON_SECRET_CONFIG_KEYS
+        and str(value).strip().lower() not in _BOOLEAN_VALUES
+    ]
+
+
+def filter_credential_mail_servers(servers: list[dict]) -> list[dict]:
+    """`get_mail_servers` rows down to the ones a dump would leak: a stored
+    relay credential, or a known production relay host.
+
+    The stub and the test catchers are dropped -- neither has a credential
+    to leak. Inactive rows are kept, unlike the `mail` audit's active-only
+    counting: an archived relay cannot send anything, but its stored
+    password is in the dump all the same.
+
+    A row matching a known production relay is kept even with no stored
+    credential: such a relay commonly authenticates by IP allowlist or
+    `from_filter` instead, so "no smtp_user" is not "no production
+    config" -- the host itself is the finding, and a copy pointed at it
+    is one cron away from mailing real customers.
+    """
+    return [
+        {
+            "name": row["name"],
+            "smtp_host": row["smtp_host"],
+            "smtp_port": row["smtp_port"],
+            "smtp_user": row["smtp_user"],
+            "has_password": bool(row["smtp_pass"]),
+            "active": row["active"],
+            "known_production_relay": row["known_production_relay"],
+        }
+        for row in servers
+        if not row["is_neutralization_stub"]
+        and not row["is_test_catcher"]
+        and (row["smtp_user"] or row["smtp_pass"] or row["known_production_relay"])
+    ]
+
+
+def _sensitive_candidate_tables(cur: psycopg.Cursor) -> list[dict]:
+    """Tables named after an integration credential store, with their row
+    count and secret-looking columns.
+
+    The counts are exact rather than `reltuples` estimates: these are a
+    handful of tables, and "0 rows" is the answer that lets a reviewer drop
+    a hit without opening it -- an estimate that says 0 on a
+    never-analyzed table would drop real ones instead.
+    """
+    # `strpos`, not ILIKE: `_` is a single-character wildcard in a LIKE
+    # pattern, so `%api_key%` also matches `apiXkey` -- fuzzy by accident,
+    # never by design. A lowercased substring search says what it means.
+    #
+    # `relkind IN ('r', 'p')` plus `NOT relispartition`: a partitioned table
+    # is 'p' and its partitions are 'r' children, so matching only 'r' misses
+    # the parent the custom module actually declared, while matching both
+    # without the flag reports the parent and every one of its partitions --
+    # the same credentials counted once per year of data.
+    cur.execute(
+        """
+        SELECT c.relname, array_agg(a.attname ORDER BY a.attname)
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+        WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relispartition
+          AND (SELECT bool_or(strpos(lower(c.relname), m) > 0) FROM unnest(%s::text[]) m)
+        GROUP BY c.relname
+        ORDER BY c.relname
+        """,
+        (list(_SENSITIVE_TABLE_MARKERS),),
+    )
+    matches = cur.fetchall()
+    if not matches:
+        return []
+
+    owners = get_model_owners(cur)
+    tables = []
+    for table, columns in matches:
+        tables.append({
+            "table": table,
+            "owner_module": owners.get(table),
+            "rows": _count_rows(cur, table),
+            "marker": _sensitive_marker(table),
+            "sensitive_columns": [column for column in columns if _is_sensitive_key(column)],
+        })
+    return tables
+
+
+def _count_rows(cur: psycopg.Cursor, table: str) -> int | None:
+    """`count(*)` on `table`, or None if it can't be read.
+
+    Behind a savepoint because a failed statement aborts the whole
+    transaction in postgres: one table the connecting role has no SELECT on
+    would otherwise take down the two sections that had already been
+    gathered, turning a partial answer into no answer at all.
+    """
+    cur.execute("SAVEPOINT sensitive_count")
+    try:
+        # identifier, not a value: the table name came out of pg_class, so it
+        # cannot be anything the caller chose.
+        cur.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table)))
+        # read before RELEASE: executing anything on this cursor replaces the
+        # result set, so fetching after it would read the RELEASE's own (empty) one
+        count = _fetch_one(cur)[0]
+    except psycopg.Error:
+        cur.execute("ROLLBACK TO SAVEPOINT sensitive_count")
+        return None
+
+    cur.execute("RELEASE SAVEPOINT sensitive_count")
+    return count
+
+
+# ---------------------------------------------------------------------------
 # dump / restore helpers
 # ---------------------------------------------------------------------------
 
