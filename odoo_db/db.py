@@ -3140,6 +3140,27 @@ def get_sensitive_information(cur: psycopg.Cursor, *, reveal: bool = False) -> d
 # every database while their columns come and go with the module, and a
 # missing column is an error, not an empty result.
 _NEUTRALIZE_SURFACES: tuple[tuple[str, str, str], ...] = (
+    # base's own two statements, and the strongest signal in the list: both
+    # tables exist on every Odoo database from 14 on, so unlike the module
+    # rows below these are never skipped for want of a table. A copy whose
+    # crons are still armed will act on its own, with nobody at the screen.
+    # autovacuum is excluded exactly as neutralize.sql excludes it -- it is
+    # the one cron Odoo deliberately leaves running.
+    (
+        "ir_cron",
+        "active AND id NOT IN (SELECT res_id FROM ir_model_data "
+        "WHERE model = 'ir.cron' AND name = 'autovacuum_job' AND module = 'base')",
+        "still fires scheduled jobs (mail queue, sync, ...)",
+    ),
+    # neutralize.sql deactivates every relay and inserts the `invalid` stub
+    # in their place. The stub itself is active by design, and a test
+    # catcher accepts mail without ever relaying it, so neither is a way
+    # out -- flagging them would only teach the reader to skim the section.
+    (
+        "ir_mail_server",
+        "active AND coalesce(smtp_host, '') NOT IN ('invalid', 'mailhog', 'mailpit', 'maildev')",
+        "can relay mail to the outside",
+    ),
     ("payment_provider", "state NOT IN ('test', 'disabled')", "can charge a real card"),
     # the same table before Odoo 16 renamed it -- both are listed because a
     # missing table and a misspelled one look alike to the existence check,

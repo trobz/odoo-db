@@ -1279,6 +1279,26 @@ def test_live_neutralize_surfaces_reports_only_what_is_still_live():
     assert live[0]["reach"] == "can charge a real card"
 
 
+def test_base_crons_and_relays_lead_the_surfaces():
+    """The strongest signal in the list, and the one that needs no module:
+    `base/data/neutralize.sql` disables every cron but autovacuum and every
+    mail server. Both tables exist on any Odoo database from 14 on, so
+    unlike the per-module rows these are never skipped for want of a table
+    -- and a copy whose crons are still armed acts on its own, with nobody
+    at the screen."""
+    surfaces = {table: condition for table, condition, _reach in _NEUTRALIZE_SURFACES}
+
+    # excluded exactly as neutralize.sql excludes it -- the one cron Odoo
+    # deliberately leaves running
+    assert "autovacuum_job" in surfaces["ir_cron"]
+    assert "active" in surfaces["ir_cron"]
+
+    # the stub is active by design and a catcher never relays, so neither is
+    # a way out; flagging them would only teach the reader to skim
+    for dead_end in ("invalid", "mailhog", "mailpit", "maildev"):
+        assert f"'{dead_end}'" in surfaces["ir_mail_server"]
+
+
 def test_both_payment_table_names_are_covered():
     """`payment_acquirer` became `payment_provider` in 16. Both stay listed:
     the existence probe cannot tell a missing table from a misspelled one, so

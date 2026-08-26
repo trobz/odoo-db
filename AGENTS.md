@@ -245,9 +245,16 @@ dump won't tell you):
   `mail.web_push_vapid_public_key`: core hands each to the browser in the
   session payload / push subscription), while every one of their secret
   siblings stays listed.
-  `live_surfaces` is the neutralization counterpart: what each module's own
-  `data/neutralize.sql` clears, expressed as the rows still in the
-  *un*-neutralized state (`_NEUTRALIZE_SURFACES`) — an enabled
+  `live_surfaces` is the neutralization counterpart: what `neutralize.sql`
+  clears, expressed as the rows still in the *un*-neutralized state
+  (`_NEUTRALIZE_SURFACES`). `base`'s own two statements lead it and are the
+  strongest signal, since `ir_cron` and `ir_mail_server` exist on every
+  database from 14 on and so are never skipped for want of a table: every
+  cron but `autovacuum_job` (excluded exactly as neutralize.sql excludes
+  it) and every relay that isn't the `invalid` stub or a known catcher —
+  the stub is active by design and a catcher never relays, so flagging
+  either would only teach the reader to skim. Then the per-module rows: an
+  enabled
   `payment_provider`, an `iap_account` token without `+disabled`, an active
   `fetchmail_server`, ... `base`'s own neutralize (mail servers off, crons
   off) is easy to see; the per-module credential stripping is the part
