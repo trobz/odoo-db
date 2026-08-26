@@ -245,6 +245,21 @@ dump won't tell you):
   `mail.web_push_vapid_public_key`: core hands each to the browser in the
   session payload / push subscription), while every one of their secret
   siblings stays listed.
+  `live_surfaces` is the neutralization counterpart: what each module's own
+  `data/neutralize.sql` clears, expressed as the rows still in the
+  *un*-neutralized state (`_NEUTRALIZE_SURFACES`) — an enabled
+  `payment_provider`, an `iap_account` token without `+disabled`, an active
+  `fetchmail_server`, ... `base`'s own neutralize (mail servers off, crons
+  off) is easy to see; the per-module credential stripping is the part
+  nothing was checking, and a database flagged `is_neutralized` with an
+  enabled payment provider is a staging copy one click from charging a real
+  card. `payment_acquirer` is listed beside `payment_provider` (renamed in
+  16) since the existence probe cannot tell a missing table from a
+  misspelled one; `mail_template` excludes rows pinned to the stub relay,
+  which is as harmless as pinning to nothing. The top-level
+  `is_neutralized` rides along because it is what makes the section
+  readable — the same list is a leftover on a database claiming
+  neutralization and an inventory on a production one.
   `mail_servers` keeps **inactive** rows, unlike the `mail`
   audit's active-only gauges: an archived relay sends nothing but its
   password is still in the dump; the stub and test catchers are dropped

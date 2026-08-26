@@ -4,12 +4,14 @@ import psycopg
 from typer.testing import CliRunner
 
 from odoo_db.db import (
+    _NEUTRALIZE_SURFACES,
     _bloat_estimate_pages,
     _count_rows,
     _groups_category_sql,
     _is_alias_domain_migration_pending,
     _is_legacy_mail_config_configured,
     _is_neutralization_stub_mail_server,
+    _live_neutralize_surfaces,
     _localize,
     _mime_family,
     _relevant_mail_config_parameters,
@@ -1235,3 +1237,60 @@ def test_count_rows_survives_a_table_it_cannot_read():
     assert cur.statements.count("SAVEPOINT sensitive_count") == 2
     assert cur.statements.count("RELEASE SAVEPOINT sensitive_count") == 1
     assert cur.statements.count("ROLLBACK TO SAVEPOINT sensitive_count") == 1
+
+
+class _FakeSurfaceCursor:
+    """Answers the existence probe from `present`, then one count per
+    surface from `counts` (absent = 0)."""
+
+    def __init__(self, present: set[str], counts: dict[str, int]):
+        self._present = present
+        self._counts = counts
+        self._last: int | None = None
+
+    def execute(self, query, params=(((),),)):
+        text = query.as_string(None) if hasattr(query, "as_string") else str(query)
+        if "to_regclass" in text:
+            self._rows = [(t, t in self._present) for t in params[0]]
+        elif "count(*)" in text:
+            table = text.split('"')[1]
+            self._last = self._counts.get(table, 0)
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return (self._last,)
+
+
+def test_live_neutralize_surfaces_reports_only_what_is_still_live():
+    """The section Nils asked for: what `neutralize` should have cleared and
+    did not. A surface whose table isn't there is skipped (module not
+    installed), one that neutralized cleanly counts 0 and stays out, and the
+    `reach` text is what tells a reader why the row matters."""
+    cur = _FakeSurfaceCursor(
+        present={"payment_acquirer", "iap_account", "fetchmail_server"},
+        counts={"payment_acquirer": 2, "iap_account": 1, "fetchmail_server": 0},
+    )
+
+    live = _live_neutralize_surfaces(cur)  # ty: ignore[invalid-argument-type]
+
+    assert [(r["table"], r["rows"]) for r in live] == [("payment_acquirer", 2), ("iap_account", 1)]
+    assert live[0]["reach"] == "can charge a real card"
+
+
+def test_both_payment_table_names_are_covered():
+    """`payment_acquirer` became `payment_provider` in 16. Both stay listed:
+    the existence probe cannot tell a missing table from a misspelled one, so
+    dropping the old name would retire the highest-value check in silence on
+    every 14/15 database."""
+    tables = [table for table, _condition, _reach in _NEUTRALIZE_SURFACES]
+
+    assert "payment_acquirer" in tables
+    assert "payment_provider" in tables
+
+    # a template pinned to Odoo's own dead-end relay is as harmless as one
+    # pinned to nothing, so the stub has to be excluded or every neutralized
+    # database reports a leftover it cannot act on
+    mail_template = next(c for t, c, _ in _NEUTRALIZE_SURFACES if t == "mail_template")
+    assert "smtp_host = 'invalid'" in mail_template

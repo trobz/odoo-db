@@ -3111,12 +3111,91 @@ def get_sensitive_information(cur: psycopg.Cursor, *, reveal: bool = False) -> d
     follows: the point is to say *where* the secrets are, and a report that
     prints them is itself the thing it warns about.
     """
+    # fetched before anything else runs on this cursor: every execute
+    # replaces the result set, so building the dict around a bare
+    # `cur.fetchall()` would hand these rows to whichever query the
+    # neighbouring value ran first.
     cur.execute("SELECT key, value FROM ir_config_parameter ORDER BY key")
+    parameters = cur.fetchall()
+
     return {
-        "config_parameters": filter_sensitive_parameters(cur.fetchall(), reveal=reveal),
+        "is_neutralized": get_is_neutralized(cur),
+        "config_parameters": filter_sensitive_parameters(parameters, reveal=reveal),
         "mail_servers": filter_credential_mail_servers(get_mail_servers(cur, reveal=reveal)),
+        "live_surfaces": _live_neutralize_surfaces(cur),
         "candidate_tables": _sensitive_candidate_tables(cur),
     }
+
+
+# What each module's own `data/neutralize.sql` clears, expressed as the
+# rows that are still in the *un*-neutralized state. `(table, condition,
+# what it can still reach)`, every condition read off that file (Odoo 19;
+# the statements have been stable since 16, where neutralize.sql first
+# ships).
+#
+# Only tables whose owning module also owns the column in the condition, so
+# "the table is here" implies "the column is here". That leaves out the
+# checks hanging off `res_company`/`res_users` (sms_twilio,
+# microsoft_calendar, the l10n_* EDI credentials): those tables exist on
+# every database while their columns come and go with the module, and a
+# missing column is an error, not an empty result.
+_NEUTRALIZE_SURFACES: tuple[tuple[str, str, str], ...] = (
+    ("payment_provider", "state NOT IN ('test', 'disabled')", "can charge a real card"),
+    # the same table before Odoo 16 renamed it -- both are listed because a
+    # missing table and a misspelled one look alike to the existence check,
+    # so dropping the old name would retire the highest-value row in
+    # silence on every 14/15 database
+    ("payment_acquirer", "state NOT IN ('test', 'disabled')", "can charge a real card"),
+    ("iap_account", "account_token NOT LIKE '%+disabled'", "bills the customer's IAP credits"),
+    ("fetchmail_server", "active", "still fetches and processes real incoming mail"),
+    ("whatsapp_account", "token <> 'dummy_token'", "sends real WhatsApp messages"),
+    ("voip_provider", "mode <> 'demo'", "places real calls"),
+    ("account_online_link", "client_id <> 'duplicate'", "keeps a live bank feed"),
+    ("certificate_certificate", "pkcs12_password <> 'dummy'", "signs with a real certificate"),
+    # the stub is excluded: a template pointing at Odoo's own dead-end relay
+    # is exactly as harmless as one pointing nowhere
+    (
+        "mail_template",
+        "mail_server_id IS NOT NULL AND mail_server_id NOT IN "
+        "(SELECT id FROM ir_mail_server WHERE smtp_host = 'invalid')",
+        "is pinned to a named relay",
+    ),
+)
+
+
+def _live_neutralize_surfaces(cur: psycopg.Cursor) -> list[dict]:
+    """Rows that `neutralize` should have cleared and did not.
+
+    `base/data/neutralize.sql` disables the mail servers and the crons, and
+    that much is easy to see. What it also does -- through each module's own
+    `neutralize.sql` -- is strip the credentials that let a copy act on the
+    outside world, and *that* is the part nothing was checking: a database
+    flagged `is_neutralized` whose payment provider is still enabled is a
+    staging copy one click away from charging a real card. Reported for a
+    production database too, where the same list is simply what it can
+    reach.
+
+    Only surfaces still live are returned; a database with nothing left
+    answers `[]`. `checked` is not tracked per row here because the table
+    itself carries `installed`: a surface whose table does not exist is
+    reported as such rather than silently skipped, so a typo in the table
+    name and a module that isn't installed stay distinguishable.
+    """
+    tables = [table for table, _condition, _reach in _NEUTRALIZE_SURFACES]
+    cur.execute(
+        "SELECT t, to_regclass('public.' || t) IS NOT NULL FROM unnest(%s::text[]) t",
+        (tables,),
+    )
+    present = dict(cur.fetchall())
+
+    live = []
+    for table, condition, reach in _NEUTRALIZE_SURFACES:
+        if not present.get(table):
+            continue
+        rows = _count_rows(cur, table, where=condition)
+        if rows:
+            live.append({"table": table, "rows": rows, "reach": reach})
+    return live
 
 
 def filter_sensitive_parameters(rows: list[tuple], *, reveal: bool = False) -> list[dict]:
@@ -3215,8 +3294,8 @@ def _sensitive_candidate_tables(cur: psycopg.Cursor) -> list[dict]:
     return tables
 
 
-def _count_rows(cur: psycopg.Cursor, table: str) -> int | None:
-    """`count(*)` on `table`, or None if it can't be read.
+def _count_rows(cur: psycopg.Cursor, table: str, *, where: str | None = None) -> int | None:
+    """`count(*)` on `table`, optionally filtered, or None if it can't be read.
 
     Behind a savepoint because a failed statement aborts the whole
     transaction in postgres: one table the connecting role has no SELECT on
@@ -3227,7 +3306,13 @@ def _count_rows(cur: psycopg.Cursor, table: str) -> int | None:
     try:
         # identifier, not a value: the table name came out of pg_class, so it
         # cannot be anything the caller chose.
-        cur.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table)))
+        # `where` is a literal from _NEUTRALIZE_SURFACES in this file, never
+        # anything a caller chose; the table name is an identifier from the
+        # catalog, quoted as one.
+        statement = sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table))
+        if where:
+            statement = statement + sql.SQL(" WHERE ") + sql.SQL(where)  # ty: ignore[invalid-argument-type]
+        cur.execute(statement)
         # read before RELEASE: executing anything on this cursor replaces the
         # result set, so fetching after it would read the RELEASE's own (empty) one
         count = _fetch_one(cur)[0]

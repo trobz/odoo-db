@@ -1334,6 +1334,7 @@ def check_sensitive_information(db_name: Annotated[str, typer.Argument(metavar="
 
     params = data["config_parameters"]
     servers = data["mail_servers"]
+    surfaces = data["live_surfaces"]
     tables = data["candidate_tables"]
 
     with _writer() as w:
@@ -1354,6 +1355,9 @@ def check_sensitive_information(db_name: Annotated[str, typer.Argument(metavar="
                 "# HELP odoo_db_sensitive_candidate_tables Tables named after a credential store",
                 "# TYPE odoo_db_sensitive_candidate_tables gauge",
                 f'odoo_db_sensitive_candidate_tables{{db="{db_name}"}} {len(tables)}',
+                "# HELP odoo_db_live_external_surfaces Module surfaces neutralize would have cleared, still live",
+                "# TYPE odoo_db_live_external_surfaces gauge",
+                f'odoo_db_live_external_surfaces{{db="{db_name}"}} {len(surfaces)}',
             ]
             w.prometheus(lines)
         else:
@@ -1387,6 +1391,16 @@ def check_sensitive_information(db_name: Annotated[str, typer.Argument(metavar="
                     # same reason the `mail` audit folds its host:port column.
                     fold=frozenset({"host"}),
                 )
+            if surfaces:
+                # the flag is what makes this section readable: the same list
+                # is a leftover on a database claiming to be neutralized and
+                # merely an inventory on a production one.
+                claim = "yes" if data["is_neutralized"] else "no"
+                w.text(f"\nLive external surfaces ({len(surfaces)}) -- database.is_neutralized: {claim}")
+                w.table(
+                    ["table", "rows", "still"],
+                    [[r["table"], str(r["rows"]), r["reach"]] for r in surfaces],
+                )
             if tables:
                 w.text(f"\nCandidate tables ({len(tables)}):")
                 w.table(
@@ -1401,7 +1415,7 @@ def check_sensitive_information(db_name: Annotated[str, typer.Argument(metavar="
                         for r in tables
                     ],
                 )
-            if not (params or servers or tables):
+            if not (params or servers or surfaces or tables):
                 w.text("No sensitive information found.")
 
 
