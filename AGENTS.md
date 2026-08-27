@@ -162,6 +162,32 @@ dump won't tell you):
   `odoo_db/db.py` under `_RECOGNIZED_FUNCTIONS` / `_RECOGNIZED_TRIGGERS`.
 - `crons --running` is transient debug data, intentionally excluded from
   `prepare-audit`. `crons --all` additionally lists inactive crons.
+- On Odoo 18+, `crons`/`crons --all` add `failure_count`/`first_failure_date`
+  (`ir_cron` columns Odoo added alongside auto-deactivation of repeatedly
+  failing crons) and `crons --running` adds `done`/`remaining`/
+  `timed_out_counter` from the cron's most recent `ir.cron.progress` row
+  (via `db._has_cron_failure_tracking()`/`db._has_cron_progress()`, probed
+  through `pg_attribute`/`to_regclass` like `_groups_category_sql`). Both are
+  absent pre-18 — verified directly against upstream `odoo/odoo` source for
+  14.0/15.0/16.0/17.0 (neither exists) vs 18.0/19.0 (both exist, identical
+  schema) — so the keys are omitted entirely rather than emitted as
+  null/zero on an older database. `ir_cron_progress` rows are created on
+  *every* cron execution attempt (not just ones using the progress API) but
+  GC'd by Odoo's own autovacuum after 1 week, so `--running`'s progress
+  numbers reflect at most the current/most recent attempt, never full
+  history. JSON always emits the keys unconditionally on 18+ (a stable key
+  set is what makes cross-version bundles diffable) but the **text** table
+  shows the `failure_count`/`first_failure_date` (`db.has_tracked_cron_failures`)
+  and `done`/`remaining`/`timed_out` (`db.has_running_cron_progress`) columns
+  only when at least one row actually has non-null data — on a healthy 18+
+  database every cron is at `failure_count = 0` with no progress row yet, and
+  showing all-empty columns there crowds out `name`/`nextcall` into wrapping.
+  `crons --output-format prometheus` adds `odoo_db_crons_failing` (count of
+  crons with `failure_count > 0`, gated by `db.has_cron_failure_data` — the
+  key's mere *presence*, not its value, so the gauge is omitted rather than
+  reported as 0 pre-18) alongside the existing `odoo_db_crons_active`, since
+  `failure_count` exists to catch a cron before Odoo auto-deactivates it at
+  five failures and that's an alert, not something read off a text table.
 - `crons`, `modules` and `users` share one `--all` convention: default output
   shows only in-use rows (active crons/users, installed modules) and the flag
   drops the SQL filter *and* adds the status key (`active` for crons/users,

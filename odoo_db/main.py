@@ -236,20 +236,29 @@ def crons(
                 ]
                 w.prometheus(lines)
             else:
-                w.table(
-                    ["pid", "cron_id", "name", "model", "code", "query_start"],
-                    [
-                        [
-                            str(r["pid"]),
-                            str(r["cron_id"]) if r["cron_id"] is not None else "",
-                            r["name"] or "",
-                            r["model"] or "",
-                            r["code"] or "",
-                            r["query_start"] or "",
+                has_progress = db.has_running_cron_progress(rows_data)
+                header = ["pid", "cron_id", "name", "model", "code", "query_start"]
+                if has_progress:
+                    header += ["done", "remaining", "timed_out"]
+
+                def running_row_cells(r: dict) -> list[str]:
+                    cells = [
+                        str(r["pid"]),
+                        str(r["cron_id"]) if r["cron_id"] is not None else "",
+                        r["name"] or "",
+                        r["model"] or "",
+                        r["code"] or "",
+                        r["query_start"] or "",
+                    ]
+                    if has_progress:
+                        cells += [
+                            str(r["done"]) if r["done"] is not None else "",
+                            str(r["remaining"]) if r["remaining"] is not None else "",
+                            str(r["timed_out_counter"]) if r["timed_out_counter"] is not None else "",
                         ]
-                        for r in rows_data
-                    ],
-                )
+                    return cells
+
+                w.table(header, [running_row_cells(r) for r in rows_data])
             return
 
         if w.fmt == "json":
@@ -261,13 +270,25 @@ def crons(
                 "# TYPE odoo_db_crons_active gauge",
                 f'odoo_db_crons_active{{db="{db_name}"}} {active_count}',
             ]
+            # odoo 18+ only: emitting 0 on an older database would read as
+            # "no failing crons" when the truth is "not tracked at all".
+            if db.has_cron_failure_data(rows_data):
+                failing = sum(1 for r in rows_data if r.get("failure_count"))
+                lines += [
+                    "# HELP odoo_db_crons_failing Crons with consecutive failures (Odoo 18+)",
+                    "# TYPE odoo_db_crons_failing gauge",
+                    f'odoo_db_crons_failing{{db="{db_name}"}} {failing}',
+                ]
             w.prometheus(lines)
         else:
+            has_failure_tracking = db.has_tracked_cron_failures(rows_data)
             header = ["name", "interval", "nextcall"]
             if include_code:
                 header.append("code")
             if include_inactive:
                 header.append("active")
+            if has_failure_tracking:
+                header += ["failure_count", "first_failure_date"]
 
             def row_cells(r: dict) -> list[str]:
                 cells = [r["name"], r["interval"], r["nextcall"]]
@@ -275,6 +296,9 @@ def crons(
                     cells.append(r.get("code") or "")
                 if include_inactive:
                     cells.append(str(r.get("active")))
+                if has_failure_tracking:
+                    cells.append(str(r.get("failure_count") or 0))
+                    cells.append(r.get("first_failure_date") or "")
                 return cells
 
             w.table(header, [row_cells(r) for r in rows_data])
