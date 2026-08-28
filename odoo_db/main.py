@@ -1310,6 +1310,116 @@ def studio(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 
 
 # ---------------------------------------------------------------------------
+# check-sensitive-information
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="check-sensitive-information")
+def check_sensitive_information(db_name: Annotated[str, typer.Argument(metavar="DB")]):
+    """Surface secrets a database still carries: config keys, mail relay credentials, custom credential tables.
+
+    The question to answer before a dump leaves the building, and the one
+    neutralizing a copy does *not* answer: `neutralize` clears what a
+    database can still do, and only for modules that ship a neutralize.sql
+    — a client's own module never does, so its API keys survive intact.
+
+    Values are masked by default; pass the global
+    --include-sensitive-information to reveal them. Detection is by name
+    (`_is_sensitive_key`, `_SENSITIVE_TABLE_MARKERS`) and best-effort in
+    both directions: a credential in a table named nothing like one is not
+    found, and a hit is a candidate to read, not a verdict.
+    """
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        data = db.get_sensitive_information(cur, reveal=_include_sensitive)
+
+    params = data["config_parameters"]
+    servers = data["mail_servers"]
+    surfaces = data["live_surfaces"]
+    tables = data["candidate_tables"]
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(data)
+        elif w.fmt == "prometheus":
+            # One gauge per section rather than a single total: they are
+            # three different jobs to do (rotate a key, clear a relay, read
+            # a custom table), so an alert on one shouldn't move when
+            # another changes.
+            lines = [
+                "# HELP odoo_db_sensitive_config_parameters Secret-bearing config parameters with a value",
+                "# TYPE odoo_db_sensitive_config_parameters gauge",
+                f'odoo_db_sensitive_config_parameters{{db="{db_name}"}} {len(params)}',
+                "# HELP odoo_db_sensitive_mail_servers Mail servers storing relay credentials",
+                "# TYPE odoo_db_sensitive_mail_servers gauge",
+                f'odoo_db_sensitive_mail_servers{{db="{db_name}"}} {len(servers)}',
+                "# HELP odoo_db_sensitive_candidate_tables Tables named after a credential store",
+                "# TYPE odoo_db_sensitive_candidate_tables gauge",
+                f'odoo_db_sensitive_candidate_tables{{db="{db_name}"}} {len(tables)}',
+                "# HELP odoo_db_live_external_surfaces Module surfaces neutralize would have cleared, still live",
+                "# TYPE odoo_db_live_external_surfaces gauge",
+                f'odoo_db_live_external_surfaces{{db="{db_name}"}} {len(surfaces)}',
+            ]
+            w.prometheus(lines)
+        else:
+            if params:
+                w.text(f"Config parameters ({len(params)}):")
+                w.table(
+                    ["key", "value", "matched"],
+                    [[r["key"], r["value"] or "", r["marker"] or ""] for r in params],
+                )
+            if servers:
+                w.text(f"\nMail servers with credentials ({len(servers)}):")
+                # "relay" earns its column now that a known production relay
+                # is listed even with no stored credential: without it such a
+                # row shows an empty user and password, and reads as noise
+                # rather than as the finding it is.
+                w.table(
+                    ["name", "host", "user", "password", "active", "relay"],
+                    [
+                        [
+                            r["name"] or "",
+                            f"{r['smtp_host'] or ''}:{r['smtp_port'] or ''}",
+                            r["smtp_user"] or "",
+                            "set" if r["has_password"] else "",
+                            "yes" if r["active"] else "no",
+                            r["known_production_relay"] or "",
+                        ]
+                        for r in servers
+                    ],
+                    # the host is the finding when a production relay stores
+                    # no credential, so it must not elide at 80 columns --
+                    # same reason the `mail` audit folds its host:port column.
+                    fold=frozenset({"host"}),
+                )
+            if surfaces:
+                # the flag is what makes this section readable: the same list
+                # is a leftover on a database claiming to be neutralized and
+                # merely an inventory on a production one.
+                claim = "yes" if data["is_neutralized"] else "no"
+                w.text(f"\nLive external surfaces ({len(surfaces)}) -- database.is_neutralized: {claim}")
+                w.table(
+                    ["table", "rows", "still"],
+                    [[r["table"], str(r["rows"]), r["reach"]] for r in surfaces],
+                )
+            if tables:
+                w.text(f"\nCandidate tables ({len(tables)}):")
+                w.table(
+                    ["table", "module", "rows", "sensitive columns"],
+                    [
+                        [
+                            r["table"],
+                            r["owner_module"] or "(none)",
+                            str(r["rows"]),
+                            ", ".join(r["sensitive_columns"]) or "",
+                        ]
+                        for r in tables
+                    ],
+                )
+            if not (params or servers or surfaces or tables):
+                w.text("No sensitive information found.")
+
+
+# ---------------------------------------------------------------------------
 # not-odoo
 # ---------------------------------------------------------------------------
 

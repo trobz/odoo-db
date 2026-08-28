@@ -228,6 +228,68 @@ dump won't tell you):
   Mailtrap sandbox-vs-live split, the known-production-relay table, the
   demo-data default addresses) lives in the corresponding function
   docstrings/comments in `db.py`, not here.
+- `check-sensitive-information` answers "what secrets does this database
+  still hold", the complement of neutralization's "what can it still do".
+  `db.get_sensitive_information()` returns 3 sections. `config_parameters`
+  reuses `_is_sensitive_key` (same matcher `params` masks with) but drops
+  rows whose value is only a boolean literal (`_BOOLEAN_VALUES`):
+  `auth_signup.reset_password` is a checkbox, and a false positive costs
+  more in a report that exists to name secrets than in masking, where it
+  costs nothing. Deliberately nothing wider — a short numeric value stays,
+  since dropping by shape is how a real 4-digit credential would go
+  missing; core keys that match the substring while holding no secret
+  (`auth_password_policy.minlength`) are named in `_NON_SECRET_CONFIG_KEYS`
+  instead, an exact-key allowlist hiding only what it names — including the
+  ones that are public *by design* behind a `_key` suffix
+  (`cf.turnstile_site_key`, `recaptcha_public_key`,
+  `mail.web_push_vapid_public_key`: core hands each to the browser in the
+  session payload / push subscription), while every one of their secret
+  siblings stays listed.
+  `live_surfaces` is the neutralization counterpart: what `neutralize.sql`
+  clears, expressed as the rows still in the *un*-neutralized state
+  (`_NEUTRALIZE_SURFACES`). `base`'s own two statements lead it and are the
+  strongest signal, since `ir_cron` and `ir_mail_server` exist on every
+  database from 14 on and so are never skipped for want of a table: every
+  cron but `autovacuum_job` (excluded exactly as neutralize.sql excludes
+  it) and every relay that isn't the `invalid` stub or a known catcher —
+  the stub is active by design and a catcher never relays, so flagging
+  either would only teach the reader to skim. Then the per-module rows: an
+  enabled
+  `payment_provider`, an `iap_account` token without `+disabled`, an active
+  `fetchmail_server`, ... `base`'s own neutralize (mail servers off, crons
+  off) is easy to see; the per-module credential stripping is the part
+  nothing was checking, and a database flagged `is_neutralized` with an
+  enabled payment provider is a staging copy one click from charging a real
+  card. `payment_acquirer` is listed beside `payment_provider` (renamed in
+  16) since the existence probe cannot tell a missing table from a
+  misspelled one; `mail_template` excludes rows pinned to the stub relay,
+  which is as harmless as pinning to nothing. The top-level
+  `is_neutralized` rides along because it is what makes the section
+  readable — the same list is a leftover on a database claiming
+  neutralization and an inventory on a production one.
+  `mail_servers` keeps **inactive** rows, unlike the `mail`
+  audit's active-only gauges: an archived relay sends nothing but its
+  password is still in the dump; the stub and test catchers are dropped
+  (no credential to leak). A row with **no** stored credential is kept
+  when `known_production_relay` matches — such a relay commonly
+  authenticates by IP allowlist/`from_filter`, so the host is the
+  finding; the text table carries a `relay` column so that row doesn't
+  read as an empty-credential false positive.
+  `candidate_tables` matches table names against
+  `_SENSITIVE_TABLE_MARKERS` (`api_key`, `api_config`, `api_instance`,
+  `api_url`, wildcarded both sides since a custom module prefixes its
+  tables) — kept separate from `_SENSITIVE_KEY_MARKERS` on purpose:
+  overlapping them drags in every core `*_token`/`password` column and
+  buries the handful of rows a reviewer can act on. Core ships no table
+  named that way, so a match is nearly always custom. Row counts are exact
+  `count(*)`, not `reltuples`: "0 rows" is what lets a reviewer dismiss a
+  hit, and a never-analyzed table estimates 0. Each count runs behind a
+  savepoint (`_count_rows`): a failed statement aborts the whole
+  transaction in postgres, so one table the role cannot read would
+  otherwise take down the two sections already gathered — it reports
+  `rows: null` instead. `filter_sensitive_parameters`
+  and `filter_credential_mail_servers` are pure over fetched rows
+  (unit-tested without a cursor, same as `filter_online_users`).
 - `attachments` audits `ir.attachment` storage in pure SQL — no ORM, so it
   sees field-backed rows (`image_1920`, logos, signatures) natively. The ORM's
   `_search` auto-injects `res_field = False` and hides them; raw SQL has no

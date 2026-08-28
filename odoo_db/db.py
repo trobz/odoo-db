@@ -3019,6 +3019,333 @@ def get_locks(cur: psycopg.Cursor, dbname: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# sensitive information
+# ---------------------------------------------------------------------------
+
+# Table-name markers for objects a custom module is likely to have parked
+# credentials in. Wildcarded on both sides deliberately: a custom module
+# prefixes its tables (`x_api_config`, `trobz_api_instance`), so anchoring
+# these would match almost nothing on a real database.
+#
+# Kept separate from _SENSITIVE_KEY_MARKERS, which describes
+# ir_config_parameter *keys*: overlapping the two would drag in every
+# `res_users.password` and `*_token` column Odoo core ships, burying the
+# handful of rows a reviewer can act on. The markers here name integration
+# tables, which core has none of -- so a match is nearly always custom.
+_SENSITIVE_TABLE_MARKERS = ("api_key", "api_config", "api_instance", "api_url")
+
+
+# `auth_signup.reset_password` is a checkbox, not a password -- and
+# `_is_sensitive_key` matches it on the substring, as it should for masking
+# (masking a boolean costs nothing). In a report whose whole purpose is to
+# list the secrets, a false positive costs the reader's trust in the other
+# rows, so a value that is only a boolean literal is dropped. Nothing wider:
+# a short numeric value (`...duration = 90`) stays, since dropping by shape
+# is how a real 4-digit credential would go missing.
+_BOOLEAN_VALUES = frozenset(("true", "false", "0", "1"))
+
+# Core keys `_is_sensitive_key` matches on a substring while holding no
+# secret at all -- `auth_password_policy.minlength` is a policy number that
+# says "password". Dropping them by *value shape* was rejected above (a
+# 4-digit credential looks the same), so they are named instead: an exact
+# key allowlist can only ever hide the key it names, and each entry is a
+# core key whose meaning is fixed. A custom module's key never lands here.
+#
+# The second group is public *by design*, which the `_key` suffix hides:
+# core hands `cf.turnstile_site_key` and `recaptcha_public_key` to the
+# browser itself (`ir_http.py` puts them in the session payload), and the
+# VAPID public key is the half of the pair a push subscription publishes --
+# its `_private_key` sibling is the secret and stays listed. Matched as
+# exact keys rather than a `*_public_key`/`*_site_key` suffix rule for the
+# same reason as above: a rule hides keys nobody has read yet.
+_NON_SECRET_CONFIG_KEYS = frozenset((
+    "auth_password_policy.minlength",
+    "cf.turnstile_site_key",
+    "mail.web_push_vapid_public_key",
+    "recaptcha_public_key",
+    # a URL with a documented default (DEFAULT_MICROSOFT_TOKEN_ENDPOINT),
+    # matched only on the word "token"
+    "microsoft_account.token_endpoint",
+))
+
+
+def _sensitive_marker(name: str) -> str | None:
+    """Which marker flagged `name`, for a reader who has to judge the hit."""
+    lowered = name.lower()
+    for marker in (*_SENSITIVE_KEY_MARKERS, *_SENSITIVE_TABLE_MARKERS):
+        if marker in lowered:
+            return marker
+    return "key" if re.search(r"(^|[._])key$", lowered) else None
+
+
+def get_sensitive_information(cur: psycopg.Cursor, *, reveal: bool = False) -> dict:
+    """What secrets a database still carries — the question to answer before
+    a dump leaves the building, or after a copy has been neutralized.
+
+    Neutralization is the related but different question: it asks what a
+    database can still *do* (mail servers disabled, crons off), while this
+    asks what it still *holds*. A neutralized copy still has every API key
+    its custom modules stored -- `base/data/neutralize.sql` only clears the
+    credentials of modules that ship a neutralize.sql, and a client's own
+    module never does.
+
+    Three sections, each a different way a credential hides:
+
+    - `config_parameters`: `ir_config_parameter` rows whose key looks
+      secret-bearing (`_is_sensitive_key`) *and* actually hold a value. The
+      empty ones are reported nowhere: a key with no value is not a leak,
+      and listing it only pads the report a reviewer has to read.
+    - `mail_servers`: `ir.mail_server` rows carrying real relay
+      credentials. Odoo's own neutralization stub and the known test
+      catchers are excluded -- neither has a credential to leak. Inactive
+      rows are *included*, unlike the `mail` audit's: an archived relay
+      cannot send anything, but its stored password is in the dump all the
+      same.
+    - `candidate_tables`: tables whose name matches
+      `_SENSITIVE_TABLE_MARKERS`, with the row count and which of their
+      columns look secret-bearing. `owner_module` is the module that owns
+      the table (`get_model_owners`), or None when nothing claims it --
+      those are the custom/orphan ones worth reading first.
+
+    Values are masked unless `reveal`, the same rule `get_config_parameters`
+    follows: the point is to say *where* the secrets are, and a report that
+    prints them is itself the thing it warns about.
+    """
+    # fetched before anything else runs on this cursor: every execute
+    # replaces the result set, so building the dict around a bare
+    # `cur.fetchall()` would hand these rows to whichever query the
+    # neighbouring value ran first.
+    cur.execute("SELECT key, value FROM ir_config_parameter ORDER BY key")
+    parameters = cur.fetchall()
+
+    return {
+        "is_neutralized": get_is_neutralized(cur),
+        "config_parameters": filter_sensitive_parameters(parameters, reveal=reveal),
+        "mail_servers": filter_credential_mail_servers(get_mail_servers(cur, reveal=reveal)),
+        "live_surfaces": _live_neutralize_surfaces(cur),
+        "candidate_tables": _sensitive_candidate_tables(cur),
+    }
+
+
+# What each module's own `data/neutralize.sql` clears, expressed as the
+# rows that are still in the *un*-neutralized state. `(table, condition,
+# what it can still reach)`, every condition read off that file (Odoo 19;
+# the statements have been stable since 16, where neutralize.sql first
+# ships).
+#
+# Only tables whose owning module also owns the column in the condition, so
+# "the table is here" implies "the column is here". That leaves out the
+# checks hanging off `res_company`/`res_users` (sms_twilio,
+# microsoft_calendar, the l10n_* EDI credentials): those tables exist on
+# every database while their columns come and go with the module, and a
+# missing column is an error, not an empty result.
+_NEUTRALIZE_SURFACES: tuple[tuple[str, str, str], ...] = (
+    # base's own two statements, and the strongest signal in the list: both
+    # tables exist on every Odoo database from 14 on, so unlike the module
+    # rows below these are never skipped for want of a table. A copy whose
+    # crons are still armed will act on its own, with nobody at the screen.
+    # autovacuum is excluded exactly as neutralize.sql excludes it -- it is
+    # the one cron Odoo deliberately leaves running.
+    (
+        "ir_cron",
+        "active AND id NOT IN (SELECT res_id FROM ir_model_data "
+        "WHERE model = 'ir.cron' AND name = 'autovacuum_job' AND module = 'base')",
+        "still fires scheduled jobs (mail queue, sync, ...)",
+    ),
+    # neutralize.sql deactivates every relay and inserts the `invalid` stub
+    # in their place. The stub itself is active by design, and a test
+    # catcher accepts mail without ever relaying it, so neither is a way
+    # out -- flagging them would only teach the reader to skim the section.
+    (
+        "ir_mail_server",
+        "active AND coalesce(smtp_host, '') NOT IN ('invalid', 'mailhog', 'mailpit', 'maildev')",
+        "can relay mail to the outside",
+    ),
+    ("payment_provider", "state NOT IN ('test', 'disabled')", "can charge a real card"),
+    # the same table before Odoo 16 renamed it -- both are listed because a
+    # missing table and a misspelled one look alike to the existence check,
+    # so dropping the old name would retire the highest-value row in
+    # silence on every 14/15 database
+    ("payment_acquirer", "state NOT IN ('test', 'disabled')", "can charge a real card"),
+    ("iap_account", "account_token NOT LIKE '%+disabled'", "bills the customer's IAP credits"),
+    ("fetchmail_server", "active", "still fetches and processes real incoming mail"),
+    ("whatsapp_account", "token <> 'dummy_token'", "sends real WhatsApp messages"),
+    ("voip_provider", "mode <> 'demo'", "places real calls"),
+    ("account_online_link", "client_id <> 'duplicate'", "keeps a live bank feed"),
+    ("certificate_certificate", "pkcs12_password <> 'dummy'", "signs with a real certificate"),
+    # the stub is excluded: a template pointing at Odoo's own dead-end relay
+    # is exactly as harmless as one pointing nowhere
+    (
+        "mail_template",
+        "mail_server_id IS NOT NULL AND mail_server_id NOT IN "
+        "(SELECT id FROM ir_mail_server WHERE smtp_host = 'invalid')",
+        "is pinned to a named relay",
+    ),
+)
+
+
+def _live_neutralize_surfaces(cur: psycopg.Cursor) -> list[dict]:
+    """Rows that `neutralize` should have cleared and did not.
+
+    `base/data/neutralize.sql` disables the mail servers and the crons, and
+    that much is easy to see. What it also does -- through each module's own
+    `neutralize.sql` -- is strip the credentials that let a copy act on the
+    outside world, and *that* is the part nothing was checking: a database
+    flagged `is_neutralized` whose payment provider is still enabled is a
+    staging copy one click away from charging a real card. Reported for a
+    production database too, where the same list is simply what it can
+    reach.
+
+    Only surfaces still live are returned; a database with nothing left
+    answers `[]`. `checked` is not tracked per row here because the table
+    itself carries `installed`: a surface whose table does not exist is
+    reported as such rather than silently skipped, so a typo in the table
+    name and a module that isn't installed stay distinguishable.
+    """
+    tables = [table for table, _condition, _reach in _NEUTRALIZE_SURFACES]
+    cur.execute(
+        "SELECT t, to_regclass('public.' || t) IS NOT NULL FROM unnest(%s::text[]) t",
+        (tables,),
+    )
+    present = dict(cur.fetchall())
+
+    live = []
+    for table, condition, reach in _NEUTRALIZE_SURFACES:
+        if not present.get(table):
+            continue
+        rows = _count_rows(cur, table, where=condition)
+        if rows:
+            live.append({"table": table, "rows": rows, "reach": reach})
+    return live
+
+
+def filter_sensitive_parameters(rows: list[tuple], *, reveal: bool = False) -> list[dict]:
+    """`(key, value)` rows down to the ones that actually hold a secret.
+
+    Pure over the fetched rows so it is unit-testable without a cursor, the
+    same shape `filter_online_users`/`compute_role_drift` use.
+    """
+    return [
+        {"key": key, "value": value if reveal else _SECRET_MASK, "marker": _sensitive_marker(key)}
+        for key, value in rows
+        if value
+        and _is_sensitive_key(key)
+        and key not in _NON_SECRET_CONFIG_KEYS
+        and str(value).strip().lower() not in _BOOLEAN_VALUES
+    ]
+
+
+def filter_credential_mail_servers(servers: list[dict]) -> list[dict]:
+    """`get_mail_servers` rows down to the ones a dump would leak: a stored
+    relay credential, or a known production relay host.
+
+    The stub and the test catchers are dropped -- neither has a credential
+    to leak. Inactive rows are kept, unlike the `mail` audit's active-only
+    counting: an archived relay cannot send anything, but its stored
+    password is in the dump all the same.
+
+    A row matching a known production relay is kept even with no stored
+    credential: such a relay commonly authenticates by IP allowlist or
+    `from_filter` instead, so "no smtp_user" is not "no production
+    config" -- the host itself is the finding, and a copy pointed at it
+    is one cron away from mailing real customers.
+    """
+    return [
+        {
+            "name": row["name"],
+            "smtp_host": row["smtp_host"],
+            "smtp_port": row["smtp_port"],
+            "smtp_user": row["smtp_user"],
+            "has_password": bool(row["smtp_pass"]),
+            "active": row["active"],
+            "known_production_relay": row["known_production_relay"],
+        }
+        for row in servers
+        if not row["is_neutralization_stub"]
+        and not row["is_test_catcher"]
+        and (row["smtp_user"] or row["smtp_pass"] or row["known_production_relay"])
+    ]
+
+
+def _sensitive_candidate_tables(cur: psycopg.Cursor) -> list[dict]:
+    """Tables named after an integration credential store, with their row
+    count and secret-looking columns.
+
+    The counts are exact rather than `reltuples` estimates: these are a
+    handful of tables, and "0 rows" is the answer that lets a reviewer drop
+    a hit without opening it -- an estimate that says 0 on a
+    never-analyzed table would drop real ones instead.
+    """
+    # `strpos`, not ILIKE: `_` is a single-character wildcard in a LIKE
+    # pattern, so `%api_key%` also matches `apiXkey` -- fuzzy by accident,
+    # never by design. A lowercased substring search says what it means.
+    #
+    # `relkind IN ('r', 'p')` plus `NOT relispartition`: a partitioned table
+    # is 'p' and its partitions are 'r' children, so matching only 'r' misses
+    # the parent the custom module actually declared, while matching both
+    # without the flag reports the parent and every one of its partitions --
+    # the same credentials counted once per year of data.
+    cur.execute(
+        """
+        SELECT c.relname, array_agg(a.attname ORDER BY a.attname)
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+        WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relispartition
+          AND (SELECT bool_or(strpos(lower(c.relname), m) > 0) FROM unnest(%s::text[]) m)
+        GROUP BY c.relname
+        ORDER BY c.relname
+        """,
+        (list(_SENSITIVE_TABLE_MARKERS),),
+    )
+    matches = cur.fetchall()
+    if not matches:
+        return []
+
+    owners = get_model_owners(cur)
+    tables = []
+    for table, columns in matches:
+        tables.append({
+            "table": table,
+            "owner_module": owners.get(table),
+            "rows": _count_rows(cur, table),
+            "marker": _sensitive_marker(table),
+            "sensitive_columns": [column for column in columns if _is_sensitive_key(column)],
+        })
+    return tables
+
+
+def _count_rows(cur: psycopg.Cursor, table: str, *, where: str | None = None) -> int | None:
+    """`count(*)` on `table`, optionally filtered, or None if it can't be read.
+
+    Behind a savepoint because a failed statement aborts the whole
+    transaction in postgres: one table the connecting role has no SELECT on
+    would otherwise take down the two sections that had already been
+    gathered, turning a partial answer into no answer at all.
+    """
+    cur.execute("SAVEPOINT sensitive_count")
+    try:
+        # identifier, not a value: the table name came out of pg_class, so it
+        # cannot be anything the caller chose.
+        # `where` is a literal from _NEUTRALIZE_SURFACES in this file, never
+        # anything a caller chose; the table name is an identifier from the
+        # catalog, quoted as one.
+        statement = sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table))
+        if where:
+            statement = statement + sql.SQL(" WHERE ") + sql.SQL(where)  # ty: ignore[invalid-argument-type]
+        cur.execute(statement)
+        # read before RELEASE: executing anything on this cursor replaces the
+        # result set, so fetching after it would read the RELEASE's own (empty) one
+        count = _fetch_one(cur)[0]
+    except psycopg.Error:
+        cur.execute("ROLLBACK TO SAVEPOINT sensitive_count")
+        return None
+
+    cur.execute("RELEASE SAVEPOINT sensitive_count")
+    return count
+
+
+# ---------------------------------------------------------------------------
 # dump / restore helpers
 # ---------------------------------------------------------------------------
 
