@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v1.22.0 (2026-08-28)
+
+### Features
+
+- **sensitive**: Add check-sensitive-information command
+  ([`55f4791`](https://github.com/trobz/odoo-db/commit/55f47919329dfe7cc56576d20429fc84070ad06b))
+
+- **sensitive**: Lead the surfaces with base's own crons and relays
+  ([`95c3436`](https://github.com/trobz/odoo-db/commit/95c34362da0c16547c6bf6fb0ea844e4cbe242de))
+
+- **sensitive**: Report what neutralize should have cleared and did not
+  ([`dec173d`](https://github.com/trobz/odoo-db/commit/dec173df905dfc642745b8f9617cf47723c1a884))
+
+
 ## v1.21.0 (2026-08-21)
 
 ### Features
