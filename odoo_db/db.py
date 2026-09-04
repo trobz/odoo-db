@@ -320,16 +320,35 @@ def get_config_parameters(cur: psycopg.Cursor, *, pattern: str | None = None, re
     return rows
 
 
+def _has_cron_failure_tracking(cur: psycopg.Cursor) -> bool:
+    """Odoo 18+ only: ``ir_cron.failure_count``/``first_failure_date``, used to
+    auto-deactivate a cron after enough consecutive failures. Probed via
+    ``pg_attribute`` (not ``information_schema``) for the same reason as
+    ``_groups_category_sql``: ``attrelid = to_regclass('ir_cron')`` pins the
+    probe to the exact relation the surrounding query will resolve, whereas
+    ``information_schema.columns`` matches on a bare table name and could
+    report a same-named table in another schema.
+    """
+    cur.execute("""
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass('ir_cron') AND attname = 'failure_count' AND NOT attisdropped
+    """)
+    return cur.fetchone() is not None
+
+
 def get_crons(cur: psycopg.Cursor, *, include_code: bool = False, include_inactive: bool = False) -> list[dict]:
     where_clause = sql.SQL("") if include_inactive else sql.SQL("WHERE ic.active = true")
+    has_failure_tracking = _has_cron_failure_tracking(cur)
+    failure_cols = sql.SQL(", ic.failure_count, ic.first_failure_date") if has_failure_tracking else sql.SQL("")
     cur.execute(
         sql.SQL("""
             SELECT ic.cron_name, ic.interval_number, ic.interval_type, ic.nextcall, ias.code, ic.active
+                {failure_cols}
             FROM ir_cron ic
             LEFT JOIN ir_act_server ias ON ias.id = ic.ir_actions_server_id
             {where}
             ORDER BY ic.nextcall
-        """).format(where=where_clause)
+        """).format(where=where_clause, failure_cols=failure_cols)
     )
     return [
         {
@@ -338,9 +357,26 @@ def get_crons(cur: psycopg.Cursor, *, include_code: bool = False, include_inacti
             "nextcall": str(row[3]),
             **({"code": (row[4] or "").strip() or None} if include_code else {}),
             **({"active": row[5]} if include_inactive else {}),
+            **(
+                {"failure_count": row[6], "first_failure_date": str(row[7]) if row[7] else None}
+                if has_failure_tracking
+                else {}
+            ),
         }
         for row in cur.fetchall()
     ]
+
+
+def _has_cron_progress(cur: psycopg.Cursor) -> bool:
+    """Odoo 18+ only: ``ir.cron.progress`` — a row created on every cron
+    execution attempt (``ir_cron._add_progress()``), reporting ``done``/
+    ``remaining``/``timed_out_counter`` for batched long-running jobs.
+    Verified absent in 14.0-17.0 and present in 18.0/19.0 upstream source
+    (github.com/odoo/odoo, ``odoo/addons/base/models/ir_cron.py``); GC'd by
+    Odoo's own autovacuum after 1 week, so there's no unbounded history here.
+    """
+    cur.execute("SELECT to_regclass('public.ir_cron_progress')")
+    return _fetch_one(cur)[0] is not None
 
 
 def get_running_crons(cur: psycopg.Cursor) -> list[dict]:
@@ -351,30 +387,61 @@ def get_running_crons(cur: psycopg.Cursor) -> list[dict]:
     pg_locks → pg_stat_activity → ir_cron via `xmax = backend_xid` to resolve
     the exact cron being executed (the current `query` text has moved on to
     the cron's workload by the time we look).
+
+    On Odoo 18+, also surfaces the cron's most recent ``ir_cron_progress``
+    row (``done``/``remaining``/``timed_out_counter``) via a LATERAL join on
+    the highest ``id`` per ``cron_id`` — mirrors the ``last_cron_progress``
+    CTE Odoo's own ``_acquire_one_job`` uses to resume batched jobs. Gives a
+    real completion signal for a long-running job instead of just "a worker
+    holds the lock". The three keys are omitted entirely pre-18. On 18+ they
+    are always present but ``None`` when the cron has no ``ir_cron_progress``
+    row yet — the probe only tests that the table exists, and the LATERAL is
+    a LEFT join, so a cron that never reached ``_add_progress()`` still gets
+    the keys with null values.
     """
-    cur.execute("""
-        SELECT
-            a.pid,
-            ic.id AS cron_id,
-            ic.cron_name,
-            im.model,
-            ias.code,
-            a.state,
-            a.query_start,
-            a.usename,
-            a.application_name,
-            a.query
-        FROM pg_locks l
-        JOIN pg_class c ON l.relation = c.oid
-        JOIN pg_stat_activity a ON a.pid = l.pid
-        LEFT JOIN ir_cron ic ON ic.xmax = a.backend_xid
-        LEFT JOIN ir_act_server ias ON ias.id = ic.ir_actions_server_id
-        LEFT JOIN ir_model im ON im.id = ias.model_id
-        WHERE c.relname = 'ir_cron' AND l.mode = 'RowShareLock'
-    """)
+    has_progress = _has_cron_progress(cur)
+    progress_join = (
+        sql.SQL("""
+            LEFT JOIN LATERAL (
+                SELECT done, remaining, timed_out_counter
+                FROM ir_cron_progress
+                WHERE cron_id = ic.id
+                ORDER BY id DESC
+                LIMIT 1
+            ) cp ON true
+        """)
+        if has_progress
+        else sql.SQL("")
+    )
+    progress_cols = sql.SQL(", cp.done, cp.remaining, cp.timed_out_counter") if has_progress else sql.SQL("")
+    cur.execute(
+        sql.SQL("""
+            SELECT
+                a.pid,
+                ic.id AS cron_id,
+                ic.cron_name,
+                im.model,
+                ias.code,
+                a.state,
+                a.query_start,
+                a.usename,
+                a.application_name,
+                a.query
+                {progress_cols}
+            FROM pg_locks l
+            JOIN pg_class c ON l.relation = c.oid
+            JOIN pg_stat_activity a ON a.pid = l.pid
+            LEFT JOIN ir_cron ic ON ic.xmax = a.backend_xid
+            LEFT JOIN ir_act_server ias ON ias.id = ic.ir_actions_server_id
+            LEFT JOIN ir_model im ON im.id = ias.model_id
+            {progress_join}
+            WHERE c.relname = 'ir_cron' AND l.mode = 'RowShareLock'
+        """).format(progress_cols=progress_cols, progress_join=progress_join)
+    )
     results: list[dict] = []
-    for pid, cron_id, name, model, code, state, query_start, usename, app_name, query in cur.fetchall():
-        results.append({
+    for row in cur.fetchall():
+        pid, cron_id, name, model, code, state, query_start, usename, app_name, query = row[:10]
+        entry = {
             "pid": pid,
             "cron_id": cron_id,
             "name": name,
@@ -385,8 +452,48 @@ def get_running_crons(cur: psycopg.Cursor) -> list[dict]:
             "user": usename,
             "application": app_name,
             "query": (query or "").strip(),
-        })
+        }
+        if has_progress:
+            done, remaining, timed_out_counter = row[10:13]
+            entry["done"] = done
+            entry["remaining"] = remaining
+            entry["timed_out_counter"] = timed_out_counter
+        results.append(entry)
     return results
+
+
+def has_cron_failure_data(rows: list[dict]) -> bool:
+    """Any row carries a `failure_count` key at all (Odoo 18+ probe result),
+    regardless of value. Gates the `crons` prometheus gauge so it's omitted
+    -- not emitted as 0 -- on a pre-18 database, where "no failing crons"
+    and "not tracked at all" must not read the same. Pure over the fetched
+    rows, same shape as `filter_online_users`.
+    """
+    return any("failure_count" in r for r in rows)
+
+
+def has_tracked_cron_failures(rows: list[dict]) -> bool:
+    """Any row shows a nonzero `failure_count`.
+
+    Gates whether the failure_count/first_failure_date columns earn a place
+    in the `crons` text table: on a healthy Odoo 18+ database every row is
+    0, and two all-empty columns crowd out name/nextcall into wrapping.
+    JSON output is unaffected -- callers there read has_cron_failure_data
+    (or the raw keys) instead, since a stable key set is what makes
+    cross-version bundles diffable.
+    """
+    return any(r.get("failure_count") for r in rows)
+
+
+def has_running_cron_progress(rows: list[dict]) -> bool:
+    """Any `--running` row carries real `ir_cron_progress` data (`done`/
+    `remaining` not None) -- gates the running-crons text table's progress
+    columns, same reasoning as `has_tracked_cron_failures`: the LATERAL
+    join attaches the keys to every row on Odoo 18+ even when no cron in
+    flight has ever reported progress, and three empty columns are worse
+    than none.
+    """
+    return any(r.get("done") is not None or r.get("remaining") is not None for r in rows)
 
 
 def get_jobs(cur: psycopg.Cursor) -> list[dict] | None:

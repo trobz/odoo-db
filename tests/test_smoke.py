@@ -29,6 +29,9 @@ from odoo_db.db import (
     get_mail_servers,
     get_modules,
     get_users,
+    has_cron_failure_data,
+    has_running_cron_progress,
+    has_tracked_cron_failures,
 )
 from odoo_db.main import app
 
@@ -1012,6 +1015,31 @@ def test_filter_online_users():
         {"login": "no_presence", "state": "unknown"},
     ]
     assert filter_online_users(rows) == [{"login": "on", "state": "online"}]
+
+
+def test_has_cron_failure_data():
+    # pre-18: key absent entirely
+    assert has_cron_failure_data([{"name": "a"}, {"name": "b"}]) is False
+    # 18+, healthy: key present but every row is 0/None
+    assert has_cron_failure_data([{"name": "a", "failure_count": 0, "first_failure_date": None}]) is True
+    assert has_cron_failure_data([]) is False
+
+
+def test_has_tracked_cron_failures():
+    # 18+, healthy: key present but all zero -- text columns should stay hidden
+    assert has_tracked_cron_failures([{"failure_count": 0}, {"failure_count": None}]) is False
+    # 18+, one cron actually failing
+    assert has_tracked_cron_failures([{"failure_count": 0}, {"failure_count": 3}]) is True
+    assert has_tracked_cron_failures([]) is False
+
+
+def test_has_running_cron_progress():
+    # 18+, LEFT JOIN attaches the keys but no cron has ever reported progress
+    assert has_running_cron_progress([{"done": None, "remaining": None}]) is False
+    # 18+, a batched job mid-run
+    assert has_running_cron_progress([{"done": 3, "remaining": 7}]) is True
+    assert has_running_cron_progress([{"done": None, "remaining": 0}]) is True
+    assert has_running_cron_progress([]) is False
 
 
 class _FakeCursor:
