@@ -5,6 +5,9 @@ from typer.testing import CliRunner
 
 from odoo_db.db import (
     _NEUTRALIZE_SURFACES,
+    NEUTRALIZED,
+    NOT_NEUTRALIZED,
+    PARTIAL,
     _bloat_estimate_pages,
     _count_rows,
     _groups_category_sql,
@@ -29,6 +32,8 @@ from odoo_db.db import (
     get_mail_servers,
     get_modules,
     get_users,
+    live_surfaces,
+    neutralization_state,
 )
 from odoo_db.main import app
 
@@ -1241,9 +1246,9 @@ def test_count_rows_survives_a_table_it_cannot_read():
 
 class _FakeSurfaceCursor:
     """Answers the existence probe from `present`, then one count per
-    surface from `counts` (absent = 0)."""
+    surface from `counts` (absent = 0, None = the role can't read it)."""
 
-    def __init__(self, present: set[str], counts: dict[str, int]):
+    def __init__(self, present: set[str], counts: dict[str, int | None]):
         self._present = present
         self._counts = counts
         self._last: int | None = None
@@ -1254,7 +1259,10 @@ class _FakeSurfaceCursor:
             self._rows = [(t, t in self._present) for t in params[0]]
         elif "count(*)" in text:
             table = text.split('"')[1]
-            self._last = self._counts.get(table, 0)
+            count = self._counts.get(table, 0)
+            if count is None:
+                raise psycopg.Error("permission denied for table " + table)
+            self._last = count
 
     def fetchall(self):
         return self._rows
@@ -1264,19 +1272,68 @@ class _FakeSurfaceCursor:
 
 
 def test_live_neutralize_surfaces_reports_only_what_is_still_live():
-    """The section Nils asked for: what `neutralize` should have cleared and
-    did not. A surface whose table isn't there is skipped (module not
-    installed), one that neutralized cleanly counts 0 and stays out, and the
-    `reach` text is what tells a reader why the row matters."""
+    """What `neutralize` should have cleared and did not.
+    `live_surfaces` is the findings -- one that neutralized cleanly
+    counts 0 and stays out -- and the `reach` text is what tells a reader
+    why the row matters."""
     cur = _FakeSurfaceCursor(
         present={"payment_acquirer", "iap_account", "fetchmail_server"},
         counts={"payment_acquirer": 2, "iap_account": 1, "fetchmail_server": 0},
     )
 
-    live = _live_neutralize_surfaces(cur)  # ty: ignore[invalid-argument-type]
+    live = live_surfaces(_live_neutralize_surfaces(cur))  # ty: ignore[invalid-argument-type]
 
     assert [(r["table"], r["rows"]) for r in live] == [("payment_acquirer", 2), ("iap_account", 1)]
     assert live[0]["reach"] == "can charge a real card"
+
+
+def test_every_surface_says_whether_its_table_was_even_there():
+    """A check skipped for want of its table has to say so. Without
+    `installed`, a module that isn't installed and a table misspelled in
+    `_NEUTRALIZE_SURFACES` look identical from the outside -- a check that
+    has never run anywhere would go on never running, and the report would
+    read as a clean bill of health."""
+    cur = _FakeSurfaceCursor(present={"iap_account"}, counts={"iap_account": 0})
+
+    surfaces = {s["table"]: s for s in _live_neutralize_surfaces(cur)}  # ty: ignore[invalid-argument-type]
+
+    # every check is accounted for, not just the ones that could run
+    assert len(surfaces) == len(_NEUTRALIZE_SURFACES)
+    assert surfaces["iap_account"]["installed"] is True
+    assert surfaces["whatsapp_account"]["installed"] is False
+    assert surfaces["whatsapp_account"]["rows"] == 0  # never counted, never a finding
+
+
+def test_a_surface_the_role_cannot_count_is_unknown_not_zero():
+    """`_count_rows` answers None where the connecting role has no SELECT.
+    Recording that as 0 would turn "nobody looked" into "nothing there" --
+    the one way this report lies."""
+    cur = _FakeSurfaceCursor(present={"iap_account"}, counts={"iap_account": None})
+
+    surfaces = {s["table"]: s for s in _live_neutralize_surfaces(cur)}  # ty: ignore[invalid-argument-type]
+
+    assert surfaces["iap_account"]["installed"] is True
+    assert surfaces["iap_account"]["rows"] is None
+    assert live_surfaces(list(surfaces.values())) == []  # unknown is not a finding either
+
+
+def test_neutralization_state_needs_the_claim_and_the_rows_to_agree():
+    """Claimed *and* clean is the only way to NEUTRALIZED: the flag is a
+    config parameter, which nothing stops a copy script or a person from
+    setting on a database that can still charge a card."""
+    clean = [{"table": "iap_account", "installed": True, "rows": 0, "reach": ""}]
+    live = [{"table": "payment_provider", "installed": True, "rows": 2, "reach": ""}]
+    unknown = [{"table": "iap_account", "installed": True, "rows": None, "reach": ""}]
+
+    assert neutralization_state(True, clean) == NEUTRALIZED
+    assert neutralization_state(True, live) == PARTIAL
+    # a surface nobody could count blocks the green exactly like a live one:
+    # the uncertainty costs a PARTIAL, never a false clean bill of health
+    assert neutralization_state(True, unknown) == PARTIAL
+
+    # without the flag the surfaces are an inventory, not a leftover
+    assert neutralization_state(False, clean) == NOT_NEUTRALIZED
+    assert neutralization_state(False, live) == NOT_NEUTRALIZED
 
 
 def test_base_crons_and_relays_lead_the_surfaces():
