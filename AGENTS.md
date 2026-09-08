@@ -308,10 +308,21 @@ dump won't tell you):
   card. `payment_acquirer` is listed beside `payment_provider` (renamed in
   16) since the existence probe cannot tell a missing table from a
   misspelled one; `mail_template` excludes rows pinned to the stub relay,
-  which is as harmless as pinning to nothing. The top-level
-  `is_neutralized` rides along because it is what makes the section
-  readable — the same list is a leftover on a database claiming
-  neutralization and an inventory on a production one.
+  which is as harmless as pinning to nothing. `surfaces` carries **every**
+  check beside `live_surfaces`' findings, each with `installed`: a check
+  skipped for want of its table has to say so, or a module that isn't
+  installed and a table misspelled in `_NEUTRALIZE_SURFACES` look alike
+  from the outside — a check that has never run anywhere would go on never
+  running while the report reads clean. `rows` is None where the table is
+  there but the role cannot count it (`_count_rows`): unknown, not zero.
+  `state` (`neutralization_state`, pure over those rows) is the verdict
+  the flag and the surfaces make together — claimed *and* clean is the only
+  way to `neutralized`, since the flag is a config parameter nothing stops
+  a copy script from setting on a database that can still charge a card;
+  an uncountable surface costs a `partial` exactly like a live one, never
+  a false clean bill of health. It leads the text output and is a
+  prometheus gauge (`odoo_db_neutralization_state`, 2/1/0), so the CLI and
+  any UI over the JSON say the same words about the same database.
   `mail_servers` keeps **inactive** rows, unlike the `mail`
   audit's active-only gauges: an archived relay sends nothing but its
   password is still in the dump; the stub and test catchers are dropped

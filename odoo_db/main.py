@@ -1338,6 +1338,22 @@ def studio(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 # ---------------------------------------------------------------------------
 
 
+# The verdict, in the words the reader needs: a partial one is not a
+# smaller version of "neutralized", it is a database to treat as production
+# until someone clears the table below it.
+_NEUTRALIZATION_VERDICTS = {
+    db.NEUTRALIZED: "NEUTRALIZED: database.is_neutralized is set and nothing below can still reach the outside.",
+    db.PARTIAL: (
+        "PARTIALLY NEUTRALIZED: database.is_neutralized is set, but the surfaces below are still live -- "
+        "neutralization did not finish, or something was switched back on afterwards. Treat this database "
+        "as production until they are cleared."
+    ),
+    db.NOT_NEUTRALIZED: "NOT NEUTRALIZED: database.is_neutralized is not set -- every action here is production.",
+}
+
+_NEUTRALIZATION_GAUGE = {db.NEUTRALIZED: 2, db.PARTIAL: 1, db.NOT_NEUTRALIZED: 0}
+
+
 @app.command(name="check-sensitive-information")
 def check_sensitive_information(db_name: Annotated[str, typer.Argument(metavar="DB")]):
     """Surface secrets a database still carries: config keys, mail relay credentials, custom credential tables.
@@ -1382,6 +1398,12 @@ def check_sensitive_information(db_name: Annotated[str, typer.Argument(metavar="
                 "# HELP odoo_db_live_external_surfaces Module surfaces neutralize would have cleared, still live",
                 "# TYPE odoo_db_live_external_surfaces gauge",
                 f'odoo_db_live_external_surfaces{{db="{db_name}"}} {len(surfaces)}',
+                # the verdict as a gauge, so an alert can fire on "claims
+                # neutralized, is not" without re-deriving it from the two
+                # metrics above
+                "# HELP odoo_db_neutralization_state 2 neutralized, 1 partial, 0 not neutralized",
+                "# TYPE odoo_db_neutralization_state gauge",
+                f'odoo_db_neutralization_state{{db="{db_name}"}} {_NEUTRALIZATION_GAUGE[data["state"]]}',
             ]
             w.prometheus(lines)
         else:
@@ -1415,12 +1437,11 @@ def check_sensitive_information(db_name: Annotated[str, typer.Argument(metavar="
                     # same reason the `mail` audit folds its host:port column.
                     fold=frozenset({"host"}),
                 )
+            # the verdict leads, whether or not anything is live: "claimed
+            # and clean" is an answer a reader came for, and a partial one
+            # is the finding this whole section exists to surface.
+            w.text(f"\n{_NEUTRALIZATION_VERDICTS[data['state']]}")
             if surfaces:
-                # the flag is what makes this section readable: the same list
-                # is a leftover on a database claiming to be neutralized and
-                # merely an inventory on a production one.
-                claim = "yes" if data["is_neutralized"] else "no"
-                w.text(f"\nLive external surfaces ({len(surfaces)}) -- database.is_neutralized: {claim}")
                 w.table(
                     ["table", "rows", "still"],
                     [[r["table"], str(r["rows"]), r["reach"]] for r in surfaces],

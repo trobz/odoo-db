@@ -3210,6 +3210,12 @@ def get_sensitive_information(cur: psycopg.Cursor, *, reveal: bool = False) -> d
       rows are *included*, unlike the `mail` audit's: an archived relay
       cannot send anything, but its stored password is in the dump all the
       same.
+    - `live_surfaces`: the rows each module's own `neutralize.sql` should
+      have cleared and did not -- a payment provider still enabled, an IAP
+      token still billable. `surfaces` carries every check alongside it,
+      live or not, so a module that isn't installed stays distinguishable
+      from a check that never ran; `state` is the verdict the two make
+      together with the flag (see `neutralization_state`).
     - `candidate_tables`: tables whose name matches
       `_SENSITIVE_TABLE_MARKERS`, with the row count and which of their
       columns look secret-bearing. `owner_module` is the module that owns
@@ -3227,11 +3233,16 @@ def get_sensitive_information(cur: psycopg.Cursor, *, reveal: bool = False) -> d
     cur.execute("SELECT key, value FROM ir_config_parameter ORDER BY key")
     parameters = cur.fetchall()
 
+    is_neutralized = get_is_neutralized(cur)
+    surfaces = _live_neutralize_surfaces(cur)
+
     return {
-        "is_neutralized": get_is_neutralized(cur),
+        "is_neutralized": is_neutralized,
+        "state": neutralization_state(is_neutralized, surfaces),
         "config_parameters": filter_sensitive_parameters(parameters, reveal=reveal),
         "mail_servers": filter_credential_mail_servers(get_mail_servers(cur, reveal=reveal)),
-        "live_surfaces": _live_neutralize_surfaces(cur),
+        "live_surfaces": live_surfaces(surfaces),
+        "surfaces": surfaces,
         "candidate_tables": _sensitive_candidate_tables(cur),
     }
 
@@ -3305,11 +3316,17 @@ def _live_neutralize_surfaces(cur: psycopg.Cursor) -> list[dict]:
     production database too, where the same list is simply what it can
     reach.
 
-    Only surfaces still live are returned; a database with nothing left
-    answers `[]`. `checked` is not tracked per row here because the table
-    itself carries `installed`: a surface whose table does not exist is
-    reported as such rather than silently skipped, so a typo in the table
-    name and a module that isn't installed stay distinguishable.
+    Every surface is returned, live or not, carrying `installed`: a check
+    that was skipped for want of its table says so rather than vanishing.
+    Without that, a module that isn't installed and a table name misspelled
+    in `_NEUTRALIZE_SURFACES` look exactly alike from the outside -- a check
+    that has never run anywhere would go on never running, and the report
+    would read as a clean bill of health. Callers that only want the
+    findings filter on `rows` (`live_surfaces`); the text output does.
+
+    `rows` is None where the table is there but could not be counted (the
+    connecting role has no SELECT on it -- see `_count_rows`). Unknown, not
+    zero: `neutralization_state` treats it as a reason not to say clean.
     """
     tables = [table for table, _condition, _reach in _NEUTRALIZE_SURFACES]
     cur.execute(
@@ -3318,14 +3335,53 @@ def _live_neutralize_surfaces(cur: psycopg.Cursor) -> list[dict]:
     )
     present = dict(cur.fetchall())
 
-    live = []
+    surfaces = []
     for table, condition, reach in _NEUTRALIZE_SURFACES:
-        if not present.get(table):
-            continue
-        rows = _count_rows(cur, table, where=condition)
-        if rows:
-            live.append({"table": table, "rows": rows, "reach": reach})
-    return live
+        installed = bool(present.get(table))
+        surfaces.append({
+            "table": table,
+            "installed": installed,
+            "rows": _count_rows(cur, table, where=condition) if installed else 0,
+            "reach": reach,
+        })
+    return surfaces
+
+
+def live_surfaces(surfaces: list[dict]) -> list[dict]:
+    """The findings out of `_live_neutralize_surfaces`: surfaces with rows
+    still in the un-neutralized state. A surface whose table is absent, or
+    whose count came back empty, is not a finding."""
+    return [surface for surface in surfaces if surface["rows"]]
+
+
+# The three answers a database gets about its own neutralization. PARTIAL is
+# the one that pays for reading the surfaces at all: the flag says safe and
+# the rows say otherwise, which is a neutralization that died halfway, a
+# flag written by hand, or something switched back on afterwards.
+NEUTRALIZED = "neutralized"
+PARTIAL = "partial"
+NOT_NEUTRALIZED = "not_neutralized"
+
+
+def neutralization_state(is_neutralized: bool, surfaces: list[dict]) -> str:
+    """The verdict, off the claim and the surfaces together.
+
+    Claimed *and* clean is the only way to NEUTRALIZED. The flag alone is
+    what a database says about itself -- a config parameter, which nothing
+    stops a copy script or a person from setting on a database that can
+    still charge a card.
+
+    A surface that could not be counted (`rows` is None) blocks the green
+    the same way a live one does: the uncertainty costs a PARTIAL, never a
+    false clean bill of health. Pure over the fetched rows, like
+    `filter_sensitive_parameters`, so both the CLI and any UI on top of the
+    JSON say the same words about the same database.
+    """
+    if not is_neutralized:
+        return NOT_NEUTRALIZED
+    if any(surface["rows"] or surface["rows"] is None for surface in surfaces):
+        return PARTIAL
+    return NEUTRALIZED
 
 
 def filter_sensitive_parameters(rows: list[tuple], *, reveal: bool = False) -> list[dict]:
