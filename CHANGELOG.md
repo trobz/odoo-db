@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.23.0 (2026-09-08)
+
+### Features
+
+- **crons**: Surface ir.cron.progress and failure_count on Odoo 18+
+  ([`f47952d`](https://github.com/trobz/odoo-db/commit/f47952d6908f5565d72c93743a21a53975da0963))
+
+
 ## v1.22.0 (2026-08-28)
 
 ### Features
