@@ -32,6 +32,9 @@ from odoo_db.db import (
     get_mail_servers,
     get_modules,
     get_users,
+    get_wkhtmltopdf_config_parameters,
+    get_wkhtmltopdf_paperformat_params,
+    get_wkhtmltopdf_relevant_modules,
     has_cron_failure_data,
     has_running_cron_progress,
     has_tracked_cron_failures,
@@ -1404,3 +1407,65 @@ def test_both_payment_table_names_are_covered():
     # database reports a leftover it cannot act on
     mail_template = next(c for t, c, _ in _NEUTRALIZE_SURFACES if t == "mail_template")
     assert "smtp_host = 'invalid'" in mail_template
+
+
+# ---------------------------------------------------------------------------
+# wkhtmltopdf
+# ---------------------------------------------------------------------------
+
+
+def test_get_wkhtmltopdf_config_parameters_fills_all_keys_including_unset():
+    cur = _FakeParamsCursor([("report.url", "https://project.example.com")])
+    result = get_wkhtmltopdf_config_parameters(cur)  # ty: ignore[invalid-argument-type]
+
+    assert [r["key"] for r in result] == ["report.url", "report.delay"]
+    by_key = {r["key"]: r["value"] for r in result}
+    assert by_key["report.url"] == "https://project.example.com"
+    # Absent key -> None ("(not defined)" at display time), same convention
+    # as get_mail_config_parameters.
+    assert by_key["report.delay"] is None
+
+
+def test_get_wkhtmltopdf_relevant_modules():
+    cur = _FakeParamsCursor([("report_wkhtmltopdf_param", "installed")])
+    result = get_wkhtmltopdf_relevant_modules(cur)  # ty: ignore[invalid-argument-type]
+
+    assert result == [{"name": "report_wkhtmltopdf_param", "state": "installed"}]
+
+
+class _FakeModuleGatedCursor:
+    """Cursor stand-in: an ir_module_module installed-check probe, then --
+    only reached if that probe found a row -- the module's own join query."""
+
+    def __init__(self, installed, rows=()):
+        self._installed = installed
+        self._rows = list(rows)
+        self._next: list = []
+
+    def execute(self, query, params=None):
+        if "ir_module_module" in query:
+            self._next = [(1,)] if self._installed else []
+            return
+        self._next = self._rows
+
+    def fetchone(self):
+        return self._next[0] if self._next else None
+
+    def fetchall(self):
+        return self._next
+
+
+def test_get_wkhtmltopdf_paperformat_params_returns_none_when_not_installed():
+    cur = _FakeModuleGatedCursor(installed=False)
+    assert get_wkhtmltopdf_paperformat_params(cur) is None  # ty: ignore[invalid-argument-type]
+
+
+def test_get_wkhtmltopdf_paperformat_params_returns_rows_when_installed():
+    rows = [(1, "A4", "--dpi", "90"), (1, "A4", "--zoom", "1.0")]
+    cur = _FakeModuleGatedCursor(installed=True, rows=rows)
+    result = get_wkhtmltopdf_paperformat_params(cur)  # ty: ignore[invalid-argument-type]
+
+    assert result == [
+        {"paperformat_id": 1, "paperformat_name": "A4", "param_name": "--dpi", "param_value": "90"},
+        {"paperformat_id": 1, "paperformat_name": "A4", "param_name": "--zoom", "param_value": "1.0"},
+    ]

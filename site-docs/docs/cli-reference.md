@@ -37,6 +37,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `crons`: List scheduled actions for a database.
 * `params`: Show ir_config_parameter keys and values...
 * `mail`: Audit outbound mail configuration: config...
+* `reports`: Diagnose PDF report generation config.
 * `jobs`: List queue job counts by state for a...
 * `users`: List users for a database.
 * `groups`: List res.groups for a database.
@@ -163,6 +164,35 @@ for a real, working server.
 
 ```console
 $ odoo-db mail [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+## `odoo-db reports`
+
+Diagnose PDF report generation config.
+
+Surfaces ``report.url``/``report.delay`` (a stale ``report.url`` is the
+classic cause of a PDF that renders with no CSS at all) and, if OCA&#x27;s
+``report_wkhtmltopdf_param`` (reporting-engine) is installed, its
+per-paperformat wkhtmltopdf CLI argument overrides -- those take
+precedence over ``report.url``/``report.delay`` alone when present.
+
+This is DB-side config only. The actual ``wkhtmltopdf --version`` running
+and PDF-related pip packages are host-level facts odoo-db has no access
+to -- odoo-activity reads those directly from the host/venv backing the
+instance.
+
+**Usage**:
+
+```console
+$ odoo-db reports [OPTIONS] DB
 ```
 
 **Arguments**:
