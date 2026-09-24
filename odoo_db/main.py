@@ -579,6 +579,63 @@ def mail(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 
 
 # ---------------------------------------------------------------------------
+# wkhtmltopdf
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def reports(db_name: Annotated[str, typer.Argument(metavar="DB")]):
+    """Diagnose PDF report generation config.
+
+    Surfaces ``report.url``/``report.delay`` (a stale ``report.url`` is the
+    classic cause of a PDF that renders with no CSS at all) and, if OCA's
+    ``report_wkhtmltopdf_param`` (reporting-engine) is installed, its
+    per-paperformat wkhtmltopdf CLI argument overrides -- those take
+    precedence over ``report.url``/``report.delay`` alone when present.
+
+    This is DB-side config only. The actual ``wkhtmltopdf --version`` running
+    and PDF-related pip packages are host-level facts odoo-db has no access
+    to -- odoo-activity reads those directly from the host/venv backing the
+    instance.
+    """
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        data = db.get_wkhtmltopdf_audit(cur)
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(data)
+        elif w.fmt == "prometheus":
+            installed = any(m["state"] == "installed" for m in data["modules"])
+            lines = [
+                "# HELP odoo_db_wkhtmltopdf_param_installed Whether OCA report_wkhtmltopdf_param is installed",
+                "# TYPE odoo_db_wkhtmltopdf_param_installed gauge",
+                f'odoo_db_wkhtmltopdf_param_installed{{db="{db_name}"}} {int(installed)}',
+            ]
+            w.prometheus(lines)
+        else:
+            w.table(
+                ["key", "value"],
+                [[c["key"], c["value"] or "(not defined)"] for c in data["config_parameters"]],
+            )
+            w.text("\nRelevant modules:")
+            w.table(
+                ["module", "state"],
+                [[m["name"], m["state"]] for m in data["modules"]],
+                empty_msg="  (none of the tracked modules found)",
+            )
+            if data["paperformat_params"] is not None:
+                w.text("\nreport_wkhtmltopdf_param overrides:")
+                w.table(
+                    ["paperformat", "param", "value"],
+                    [
+                        [p["paperformat_name"], p["param_name"], p["param_value"] or ""]
+                        for p in data["paperformat_params"]
+                    ],
+                    empty_msg="  (module installed, no overrides configured)",
+                )
+
+
+# ---------------------------------------------------------------------------
 # jobs
 # ---------------------------------------------------------------------------
 

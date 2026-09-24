@@ -2843,6 +2843,87 @@ def get_mail_audit(cur: psycopg.Cursor, *, reveal: bool = False) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# wkhtmltopdf
+# ---------------------------------------------------------------------------
+
+_WKHTMLTOPDF_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
+    ("report.url", "base URL Odoo renders reports against; a stale/wrong value is the classic no-CSS PDF cause"),
+    ("report.delay", "ms Odoo waits before snapshotting the page for PDF conversion"),
+)
+
+
+def get_wkhtmltopdf_config_parameters(cur: psycopg.Cursor) -> list[dict]:
+    """``ir_config_parameter`` values relevant to PDF report rendering.
+
+    Same shape as ``get_mail_config_parameters``: every key gets a row even
+    if unset (``value: None``), via ``dict.get`` rather than a falsy test, so
+    "never configured" and "configured blank" don't collapse into the same
+    display.
+    """
+    keys = [k for k, _ in _WKHTMLTOPDF_CONFIG_KEYS]
+    cur.execute("SELECT key, value FROM ir_config_parameter WHERE key = ANY(%s)", (keys,))
+    values = dict(cur.fetchall())
+    return [{"key": k, "explanation": e, "value": values.get(k)} for k, e in _WKHTMLTOPDF_CONFIG_KEYS]
+
+
+def get_wkhtmltopdf_relevant_modules(cur: psycopg.Cursor) -> list[dict]:
+    """State of modules that materially change wkhtmltopdf behavior (currently: ``report_wkhtmltopdf_param``)."""
+    cur.execute(
+        "SELECT name, state FROM ir_module_module WHERE name = ANY(%s) ORDER BY name",
+        (["report_wkhtmltopdf_param"],),
+    )
+    return [{"name": r[0], "state": r[1]} for r in cur.fetchall()]
+
+
+def get_wkhtmltopdf_paperformat_params(cur: psycopg.Cursor) -> list[dict] | None:
+    """Per-paperformat wkhtmltopdf CLI argument overrides from OCA's
+    ``report_wkhtmltopdf_param`` (reporting-engine). ``None`` if the module
+    isn't installed, mirroring ``get_roles``'s installed-check gate.
+
+    Unlike ``report.url``/``report.delay``, this module has no singleton
+    config: it adds ``report.paperformat.parameter`` (table
+    ``report_paperformat_parameter``: ``paperformat_id``, ``name``, ``value``)
+    as a one2many on ``report.paperformat`` (``custom_params``), so an
+    install can have zero, one, or several paperformats each with their own
+    param overrides -- confirmed against OCA/reporting-engine source
+    (14.0..main, checked 2026-09-21); re-verify against a live installed
+    copy's schema before relying on this in a migration audit.
+    """
+    cur.execute(
+        "SELECT 1 FROM ir_module_module WHERE name = %s AND state = %s",
+        ("report_wkhtmltopdf_param", "installed"),
+    )
+    if not cur.fetchone():
+        return None
+
+    cur.execute("""
+        SELECT rp.id, rp.name, rpp.name, rpp.value
+        FROM report_paperformat_parameter rpp
+        JOIN report_paperformat rp ON rp.id = rpp.paperformat_id
+        ORDER BY rp.name, rpp.name
+    """)
+    return [
+        {"paperformat_id": r[0], "paperformat_name": r[1], "param_name": r[2], "param_value": r[3]}
+        for r in cur.fetchall()
+    ]
+
+
+def get_wkhtmltopdf_audit(cur: psycopg.Cursor) -> dict:
+    """Audit bundle for PDF report generation config.
+
+    Host-level facts (the actual ``wkhtmltopdf --version`` running, PDF-related
+    pip packages) are deliberately absent here -- odoo-db has DB access only,
+    no process/filesystem access. The caller (odoo-activity) reads those
+    directly from the host running the instance.
+    """
+    return {
+        "config_parameters": get_wkhtmltopdf_config_parameters(cur),
+        "modules": get_wkhtmltopdf_relevant_modules(cur),
+        "paperformat_params": get_wkhtmltopdf_paperformat_params(cur),
+    }
+
+
 # Per-row overhead used by the statistical bloat estimate. Deliberately
 # coarse — the estimate is a triage signal, not a measurement (run with
 # pgstattuple for exact numbers). Heap: 23-byte HeapTupleHeader rounded to 24
