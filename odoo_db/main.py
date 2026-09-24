@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib.metadata import version
@@ -1852,6 +1854,83 @@ def restore(
                     typer.echo(f"Reset all res_users passwords to: {pwd}")
 
     typer.echo(f"Restore complete -> {target}")
+
+
+# ---------------------------------------------------------------------------
+# check-passwords
+# ---------------------------------------------------------------------------
+
+_WEAK_REASON_LABELS = {
+    "single_char": "single char",
+    "common": "common password",
+    "same_as_login": "same as login",
+    "plaintext": "stored plaintext",
+    "malformed": "malformed hash",
+}
+
+
+@app.command(name="check-passwords")
+def check_passwords(db_name: Annotated[str, typer.Argument(metavar="DB")]):
+    """Detect active users whose password is trivially guessable.
+
+    Tests every active user's stored pbkdf2 hash against single characters,
+    a small common-password list ('admin', 'odoo', ...), and the login
+    itself. Purely local: reads res_users.password, never attempts to log in.
+    Logins are PII: shown only with --include-sensitive-information.
+    """
+    with _handle_errors(db_name), db.cursor(db_name) as cur:
+        if not db._is_odoo(cur):
+            typer.echo(f"Error: {db_name!r} does not look like an Odoo database.", err=True)
+            raise typer.Exit(1)
+        rows = db.get_user_password_hashes(cur)
+
+    # Each candidate costs one full pbkdf2 (600k rounds in core ≈ 0.2s), so the
+    # per-user scan is CPU-bound over ~75 candidates. hashlib.pbkdf2_hmac
+    # releases the GIL, so a thread pool scales across cores with no pickling.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        checks = [(r, pool.submit(db.check_weak_password, r["login"], r["password"])) for r in rows]
+        findings = [
+            {
+                "user_id": r["user_id"],
+                **({"login": r["login"]} if _include_sensitive else {}),
+                "reason": reason,
+            }
+            for r, future in checks
+            if (reason := future.result()) is not None
+        ]
+
+    with _writer() as w:
+        if w.fmt == "json":
+            w.json(findings)
+        elif w.fmt == "prometheus":
+            # One series per reason, zeros included, so an alert on a reason
+            # clears instead of going stale; no unlabelled total, since it would
+            # be double-counted by sum() — sum over reasons gives the total.
+            reasons = dict.fromkeys(_WEAK_REASON_LABELS, 0)
+            for f in findings:
+                reasons[f["reason"]] = reasons.get(f["reason"], 0) + 1
+            lines = [
+                "# HELP odoo_db_weak_passwords Users whose password is weak, by reason",
+                "# TYPE odoo_db_weak_passwords gauge",
+            ]
+            for reason, count in sorted(reasons.items()):
+                lines.append(f'odoo_db_weak_passwords{{db="{db_name}",reason="{reason}"}} {count}')
+            w.prometheus(lines)
+        else:
+            if not findings:
+                w.text(f"No weak passwords detected among {len(rows)} active users.")
+                return
+            w.text(f"{len(findings)} weak password(s) found among {len(rows)} active users:")
+            w.table(
+                ["user", "reason"],
+                [
+                    [
+                        str(f.get("login", f"user_id={f['user_id']}")),
+                        str(_WEAK_REASON_LABELS.get(f["reason"], f["reason"])),
+                    ]
+                    for f in findings
+                ],
+            )
 
 
 if __name__ == "__main__":
