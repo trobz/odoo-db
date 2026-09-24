@@ -362,6 +362,26 @@ dump won't tell you):
   Deliberately a standalone command, **not** folded into `prepare-audit` (per
   maintainer steer) — the bundle keeps only rough per-table
   `stats.attachment_size_bytes`; deep analysis lives here.
+- `check-passwords` tests each active user's stored `res_users.password`
+  against trivial candidates (single chars, a deliberately short common list —
+  every candidate is one full 600k-round pbkdf2, ~0.2s — and the login).
+  The stored value is a **passlib ab64** payload: standard base64 without
+  padding with `+` replaced by `.` — NOT urlsafe; getting this wrong makes
+  every parse fail and the report read clean (caught by a passlib
+  positive-control test, `tests/test_check_passwords.py::
+  test_passlib_positive_control`). Verification uses `hashlib.pbkdf2_hmac`
+  (no passlib runtime dep; passlib is dev-group only for that control test);
+  `pbkdf2-sha512` maps to sha512, legacy `pbkdf2` to sha1; digests are
+  length-checked, and any non-empty value the parser rejects (truncated
+  digest, unknown scheme, `rounds <= 0`) is reported as `malformed` — never
+  silently read as "not weak"; only an empty value is skipped. The command
+  parallelizes users over a ThreadPoolExecutor (`pbkdf2_hmac` releases the
+  GIL). Plaintext values (deprecated scheme core still accepts) are a
+  finding in themselves. Logins are PII: gated behind
+  `--include-sensitive-information` like `role-drift`; prometheus gauge
+  `odoo_db_weak_passwords{reason=...}` emits one series per reason, zeros
+  included, and deliberately no unlabelled total (it would double-count
+  under `sum()`; sum over reasons instead).
 - `--include-sensitive-information` is a global PII master switch on the root
   callback (stored in `_include_sensitive`); a command's own opt-in flag is
   OR'd with it (e.g. `attachments` filenames show if either is set).

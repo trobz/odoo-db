@@ -53,6 +53,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 * `prepare-audit`: Combine summary + modules + stats +...
 * `dump`: Dump an Odoo database using pg_dump custom...
 * `restore`: Restore a pg_dump backup into a new...
+* `check-passwords`: Detect active users whose password is...
 
 ## `odoo-db list`
 
@@ -528,4 +529,27 @@ $ odoo-db restore [OPTIONS] BACKUP
 * `-v, --verbose`: Pass -v to pg_restore.
 * `--reset-passwords`: After restore, reset every res_users password. Skipped with a warning on non-Odoo DBs.
 * `-P, --password TEXT`: Password used with --reset-passwords (default: random 16 chars).
+* `--help`: Show this message and exit.
+
+## `odoo-db check-passwords`
+
+Detect active users whose password is trivially guessable.
+
+Tests every active user&#x27;s stored pbkdf2 hash against single characters,
+a small common-password list (&#x27;admin&#x27;, &#x27;odoo&#x27;, ...), and the login
+itself. Purely local: reads res_users.password, never attempts to log in.
+Logins are PII: shown only with --include-sensitive-information.
+
+**Usage**:
+
+```console
+$ odoo-db check-passwords [OPTIONS] DB
+```
+
+**Arguments**:
+
+* `DB`: \[required\]
+
+**Options**:
+
 * `--help`: Show this message and exit.
