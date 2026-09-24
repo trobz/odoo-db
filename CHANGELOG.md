@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.25.0 (2026-09-24)
+
+### Features
+
+- **reports**: Add diagnostics command for PDF report generation config
+  ([`1ffb103`](https://github.com/trobz/odoo-db/commit/1ffb103f750082ba5e7068316655b6bd4be25aab))
+
+
 ## v1.24.0 (2026-09-08)
 
 
