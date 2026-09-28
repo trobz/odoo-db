@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.26.0 (2026-09-28)
+
+### Bug Fixes
+
+- **check-passwords**: Address review feedback
+  ([`9834adf`](https://github.com/trobz/odoo-db/commit/9834adf275cd1abdb0525468d07d0ee970e0e4f4))
+
+### Features
+
+- **check-passwords**: Detect active users with trivially guessable passwords
+  ([`1fec674`](https://github.com/trobz/odoo-db/commit/1fec67435a1e29f7e46e8832a30253bc8aa48a94))
+
+
 ## v1.25.0 (2026-09-24)
 
 ### Features
