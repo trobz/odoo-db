@@ -362,6 +362,49 @@ dump won't tell you):
   Deliberately a standalone command, **not** folded into `prepare-audit` (per
   maintainer steer) — the bundle keeps only rough per-table
   `stats.attachment_size_bytes`; deep analysis lives here.
+- `check-passwords` tests each active user's stored `res_users.password`
+  against trivial candidates (single digits/lowercase letters — uppercase
+  dropped as ~50% extra runtime for no realistic hit — a deliberately short
+  common list —
+  every candidate is one full pbkdf2, 600k rounds on 16+ (~0.2s), passlib's
+  25k default on 14/15 which have no `MIN_ROUNDS` — the login, and its email
+  local part since most real logins are emails). Candidates are ordered
+  most-likely-hit first (common, login, single chars) since the scan stops
+  at the first match: `admin` costs 1 hash, not 37.
+  The stored value is a **passlib ab64** payload: standard base64 without
+  padding with `+` replaced by `.` — NOT urlsafe; getting this wrong makes
+  every parse fail and the report read clean (caught by a passlib
+  positive-control test, `tests/test_check_passwords.py::
+  test_passlib_positive_control`). Verification uses `hashlib.pbkdf2_hmac`
+  (no passlib runtime dep; passlib is dev-group only for that control test);
+  `pbkdf2-sha512` maps to sha512, legacy `pbkdf2` to sha1; decoding uses
+  `validate=True` (otherwise invalid chars are silently dropped: a garbled
+  salt decodes to `b''` and never matches), digests are length-checked,
+  and any non-empty value the parser rejects (truncated digest, empty or
+  garbled salt, unknown scheme, `rounds <= 0` or `> _MAX_PBKDF2_ROUNDS` —
+  rounds come from the untrusted row, `2**31` would be ~18h per user) is
+  reported as `malformed` — never silently read as "not weak"; only an
+  empty value is skipped. The command parallelizes users over a
+  ThreadPoolExecutor (`pbkdf2_hmac` releases the GIL) sized by `--workers`,
+  default half of `os.sched_getaffinity(0)` (not `os.cpu_count()`, which
+  ignores taskset/cgroup cpusets): with peer auth this runs on the postgres
+  host, and all-cores measured ~1300% CPU on a 40-user production copy.
+  The pool is deliberately **not** a `with` block — `__exit__` waits for
+  every queued future, so Ctrl-C only took effect after the full scan; on
+  `KeyboardInterrupt` it sets a `threading.Event` that
+  `check_weak_password` checks between candidates and calls
+  `shutdown(wait=False, cancel_futures=True)`.
+  Plaintext values (deprecated scheme core still accepts) are a finding in
+  themselves; `restore --reset-passwords` therefore stores a real hash
+  (`db.hash_password`, one shared salt for all rows since they share the
+  password) rather than plaintext. Each finding carries `share` and `totp`
+  (`None` without `auth_totp`, probed via `pg_attribute`) — a weak password
+  behind 2FA is a lower priority. JSON is `{"scanned", "findings"}` so
+  "0 findings" is distinguishable from "0 users scanned". Logins are PII:
+  gated behind `--include-sensitive-information` like `role-drift`;
+  prometheus gauge `odoo_db_weak_passwords{reason=...}` emits one series
+  per reason, zeros included, and deliberately no unlabelled total (it
+  would double-count under `sum()`; sum over reasons instead).
 - `--include-sensitive-information` is a global PII master switch on the root
   callback (stored in `_include_sensitive`); a command's own opt-in flag is
   OR'd with it (e.g. `attachments` filenames show if either is set).
@@ -374,7 +417,8 @@ dump won't tell you):
   connection to `postgres` — CREATE/DROP DATABASE can't run in a transaction);
   if pg_restore exits non-zero it prompts to drop the newly created DB so a
   half-restored shell doesn't linger. `--reset-passwords` runs
-  `UPDATE res_users` and is silently skipped (with a warning) on non-Odoo DBs
+  `UPDATE res_users` (storing a `db.hash_password` pbkdf2-sha512 hash, not
+  plaintext) and is silently skipped (with a warning) on non-Odoo DBs
   detected via `_is_odoo`.
 - `bloat` uses a two-tier engine. **Estimate (always):** statistical guess
   from `pg_class` (`relpages`/`reltuples`) + `pg_stats` avg column widths — no
