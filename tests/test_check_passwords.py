@@ -6,10 +6,13 @@ the format is identical to what Odoo stores (only the round count differs).
 
 import base64
 import hashlib
+import threading
 
 from odoo_db.db import (
     _COMMON_WEAK_PASSWORDS,
+    _PBKDF2_ROUNDS,
     check_weak_password,
+    hash_password,
     parse_password_hash,
     weak_password_candidates,
 )
@@ -59,6 +62,25 @@ def test_weak_password_same_as_login():
     assert check_weak_password("JohnDoe", _pbkdf2_hash("johndoe")) == "same_as_login"
 
 
+def test_weak_password_email_local_part():
+    assert check_weak_password("john@acme.com", _pbkdf2_hash("john")) == "same_as_login"
+    assert check_weak_password("John@acme.com", _pbkdf2_hash("john")) == "same_as_login"
+    assert check_weak_password("john@acme.com", _pbkdf2_hash("john@acme.com")) == "same_as_login"
+
+
+def test_candidates_most_likely_first():
+    # the scan stops at the first match: common first, then login, then single chars
+    reasons = [r for _, r in weak_password_candidates("bob")]
+    assert reasons[0] == "common"
+    assert reasons.index("same_as_login") < reasons.index("single_char")
+    assert reasons == sorted(reasons, key=["common", "same_as_login", "single_char"].index)
+
+
+def test_candidates_same_as_login_deduped():
+    values = [c for c, r in weak_password_candidates("bob") if r == "same_as_login"]
+    assert values == ["bob"]
+
+
 def test_strong_password_not_flagged():
     stored = _pbkdf2_hash("e$mKv82!pzQw")
     assert check_weak_password("johndoe", stored) is None
@@ -87,8 +109,9 @@ def test_candidates_include_login_and_common():
     assert "bob" in values
     for common in _COMMON_WEAK_PASSWORDS:
         assert common in values
-    # every single digit and letter is a candidate
-    assert "7" in values and "a" in values and "Z" in values
+    # every single digit and lowercase letter is a candidate, uppercase is not
+    assert "7" in values and "a" in values and "z" in values
+    assert "Z" not in values
 
 
 def test_custom_candidates():
@@ -103,6 +126,37 @@ def test_truncated_digest_rejected():
     # algo — must not silently pass as "not weak".
     assert parse_password_hash(_pbkdf2_hash("x")[:-10] + "==") is None
     assert check_weak_password("someone", "$pbkdf2-sha512$1000$dGVzdHNhbHQ$QUJD") == "malformed"
+
+
+def test_garbled_salt_rejected():
+    # b64decode without validate=True would drop the '!'s and decode an
+    # empty salt, which never matches any candidate — silently "not weak".
+    digest = _pbkdf2_hash("x").rsplit("$", 1)[1]
+    assert check_weak_password("someone", f"$pbkdf2-sha512$1000$!!!!${digest}") == "malformed"
+
+
+def test_empty_salt_rejected():
+    digest = _pbkdf2_hash("x").rsplit("$", 1)[1]
+    assert check_weak_password("someone", f"$pbkdf2-sha512$1000$${digest}") == "malformed"
+
+
+def test_excessive_rounds_rejected():
+    # rounds come from the untrusted stored value; 2**31 would take ~18h per user.
+    digest = _pbkdf2_hash("x").rsplit("$", 1)[1]
+    assert check_weak_password("someone", f"$pbkdf2-sha512${2**31}$dGVzdHNhbHQ${digest}") == "malformed"
+
+
+def test_cancel_stops_scan():
+    cancel = threading.Event()
+    cancel.set()
+    assert check_weak_password("someone", _pbkdf2_hash("admin"), cancel=cancel) is None
+
+
+def test_hash_password_roundtrip():
+    stored = hash_password("letmein")
+    parsed = parse_password_hash(stored)
+    assert parsed is not None and parsed[0] == "pbkdf2-sha512" and parsed[1] == _PBKDF2_ROUNDS
+    assert check_weak_password("bob", stored, candidates=[("letmein", "common")]) == "common"
 
 
 def test_unparsable_hash_flagged():
@@ -120,3 +174,7 @@ def test_passlib_positive_control():
     stored = ctx.hash("letmein")
     assert check_weak_password("bob", stored, candidates=[("letmein", "common")]) == "common"
     assert check_weak_password("bob", stored, candidates=[("xY9#other", "common")]) is None
+    # and the other way round: what reset_all_user_passwords stores is what
+    # Odoo's CryptContext verifies
+    ctx = CryptContext(schemes=["pbkdf2_sha512"])
+    assert ctx.verify("letmein", hash_password("letmein"))

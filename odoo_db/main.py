@@ -4,6 +4,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib.metadata import version
@@ -1869,14 +1870,41 @@ _WEAK_REASON_LABELS = {
 }
 
 
+def _default_password_workers() -> int:
+    # sched_getaffinity honors taskset/cgroup cpusets, os.cpu_count() doesn't;
+    # it's Linux-only, hence the fallback.
+    try:
+        available = len(os.sched_getaffinity(0))
+    except AttributeError:
+        available = os.cpu_count() or 2
+    return max(1, available // 2)
+
+
 @app.command(name="check-passwords")
-def check_passwords(db_name: Annotated[str, typer.Argument(metavar="DB")]):
+def check_passwords(
+    db_name: Annotated[str, typer.Argument(metavar="DB")],
+    workers: Annotated[
+        int | None,
+        typer.Option(
+            "--workers",
+            "-w",
+            min=1,
+            help="Parallel hashing threads (default: half the CPUs available to this process).",
+        ),
+    ] = None,
+):
     """Detect active users whose password is trivially guessable.
 
-    Tests every active user's stored pbkdf2 hash against single characters,
+    Tests every active user's stored pbkdf2 hash against single digits and
+    lowercase letters,
     a small common-password list ('admin', 'odoo', ...), and the login
-    itself. Purely local: reads res_users.password, never attempts to log in.
+    itself (and its email local part). Purely local: reads
+    res_users.password, never attempts to log in.
     Logins are PII: shown only with --include-sensitive-information.
+
+    CPU-heavy: ~50 full pbkdf2 verifications per user (600k rounds each on
+    Odoo 16+, ~0.2-0.5s apiece), run on the local machine — with peer auth
+    that is the postgres host itself. Use --workers to bound the load.
     """
     with _handle_errors(db_name), db.cursor(db_name) as cur:
         if not db._is_odoo(cur):
@@ -1884,24 +1912,38 @@ def check_passwords(db_name: Annotated[str, typer.Argument(metavar="DB")]):
             raise typer.Exit(1)
         rows = db.get_user_password_hashes(cur)
 
-    # Each candidate costs one full pbkdf2 (600k rounds in core ≈ 0.2s), so the
-    # per-user scan is CPU-bound over ~75 candidates. hashlib.pbkdf2_hmac
-    # releases the GIL, so a thread pool scales across cores with no pickling.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
-        checks = [(r, pool.submit(db.check_weak_password, r["login"], r["password"])) for r in rows]
-        findings = [
-            {
-                "user_id": r["user_id"],
-                **({"login": r["login"]} if _include_sensitive else {}),
-                "reason": reason,
-            }
-            for r, future in checks
-            if (reason := future.result()) is not None
-        ]
+    # hashlib.pbkdf2_hmac releases the GIL, so a thread pool scales across
+    # cores with no pickling. Not a `with` block: its __exit__ waits for every
+    # queued future, so Ctrl-C would only take effect after the full scan.
+    cancel = threading.Event()
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers or _default_password_workers())
+    try:
+        futures = [pool.submit(db.check_weak_password, r["login"], r["password"], cancel=cancel) for r in rows]
+        reasons = [f.result() for f in futures]
+    except KeyboardInterrupt:
+        # Drop queued users and make in-flight ones stop after their current
+        # candidate, so the interpreter's exit-time thread join is quick.
+        cancel.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown()
+
+    findings = [
+        {
+            "user_id": r["user_id"],
+            **({"login": r["login"]} if _include_sensitive else {}),
+            "reason": reason,
+            "share": r["share"],
+            "totp": r["totp"],
+        }
+        for r, reason in zip(rows, reasons, strict=True)
+        if reason is not None
+    ]
 
     with _writer() as w:
         if w.fmt == "json":
-            w.json(findings)
+            # `scanned` tells "0 findings" apart from "0 users scanned".
+            w.json({"scanned": len(rows), "findings": findings})
         elif w.fmt == "prometheus":
             # One series per reason, zeros included, so an alert on a reason
             # clears instead of going stale; no unlabelled total, since it would
@@ -1917,16 +1959,19 @@ def check_passwords(db_name: Annotated[str, typer.Argument(metavar="DB")]):
                 lines.append(f'odoo_db_weak_passwords{{db="{db_name}",reason="{reason}"}} {count}')
             w.prometheus(lines)
         else:
+            scope = f"{len(rows)} active users with a stored password"
             if not findings:
-                w.text(f"No weak passwords detected among {len(rows)} active users.")
+                w.text(f"No weak passwords detected among {scope}.")
                 return
-            w.text(f"{len(findings)} weak password(s) found among {len(rows)} active users:")
+            w.text(f"{len(findings)} weak password(s) found among {scope}:")
             w.table(
-                ["user", "reason"],
+                ["user", "reason", "portal", "2fa"],
                 [
                     [
                         str(f.get("login", f"user_id={f['user_id']}")),
                         str(_WEAK_REASON_LABELS.get(f["reason"], f["reason"])),
+                        "yes" if f["share"] else "no",
+                        "n/a" if f["totp"] is None else ("yes" if f["totp"] else "no"),
                     ]
                     for f in findings
                 ],

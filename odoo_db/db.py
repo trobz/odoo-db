@@ -9,6 +9,7 @@ import re
 import secrets
 import string
 import subprocess
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -3655,7 +3656,12 @@ def run_pg_restore(dbname: str, backup: Path, jobs: int = 1, verbose: bool = Fal
 
 
 def reset_all_user_passwords(cur: psycopg.Cursor, password: str) -> None:
-    cur.execute("UPDATE res_users SET password = %s", (password,))
+    # Store a proper hash, not the plaintext: core would accept plaintext
+    # (deprecated scheme, rehashed on first login) but until then every user
+    # reads as `plaintext` in check-passwords. One hash (one salt) shared by
+    # all rows: per-user salting would cost a full pbkdf2 per user, and every
+    # row holds the same password anyway.
+    cur.execute("UPDATE res_users SET password = %s", (hash_password(password),))
 
 
 def generate_password(length: int = 16) -> str:
@@ -3669,7 +3675,8 @@ def generate_password(length: int = 16) -> str:
 
 # Common trivial passwords, checked in addition to the structural rules
 # (single character, same as the login). Deliberately short: every candidate
-# costs one full pbkdf2 verification per user (600k rounds in core ≈ 0.2s).
+# costs one full pbkdf2 verification per user (600k rounds on 16+ ≈ 0.2s;
+# 14.0/15.0 have no MIN_ROUNDS and use passlib's 25k default).
 _COMMON_WEAK_PASSWORDS = (
     "admin",
     "odoo",
@@ -3683,29 +3690,72 @@ _COMMON_WEAK_PASSWORDS = (
     "demo",
 )
 
-# Single-character candidates: every digit and every ascii letter.
-_SINGLE_CHAR_CANDIDATES = tuple(string.digits + string.ascii_lowercase + string.ascii_uppercase)
+# Single-character candidates: every digit and lowercase ascii letter.
+# Uppercase is left out on purpose: it would add 26 full pbkdf2 per user
+# (~50% more runtime) for passwords nobody picks in practice.
+_SINGLE_CHAR_CANDIDATES = tuple(string.digits + string.ascii_lowercase)
+
+# Core's pbkdf2 round count (odoo/addons/base/models/res_users.py MIN_ROUNDS, 16+).
+_PBKDF2_ROUNDS = 600_000
+
+# Hashes claiming more rounds than this are reported as `malformed` rather than
+# verified: rounds come from the (untrusted) stored value, and 2**31 rounds
+# would take ~18h per user. Core never writes more than _PBKDF2_ROUNDS.
+_MAX_PBKDF2_ROUNDS = 10_000_000
 
 
-def get_user_password_hashes(cur: psycopg.Cursor, *, include_inactive: bool = False) -> list[dict]:
-    """Return {user_id, login, password} for res_users rows carrying a password.
+def _has_totp(cur: psycopg.Cursor) -> bool:
+    """``res_users.totp_secret`` exists only with ``auth_totp`` installed.
+    Probed via ``pg_attribute`` like ``_has_cron_failure_tracking``."""
+    cur.execute("""
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass('res_users') AND attname = 'totp_secret' AND NOT attisdropped
+    """)
+    return cur.fetchone() is not None
+
+
+def get_user_password_hashes(cur: psycopg.Cursor) -> list[dict]:
+    """Return {user_id, login, password, share, totp} for active res_users rows
+    carrying a password.
 
     The `password` column is Odoo's stored credential: a passlib hash
     (`$pbkdf2-sha512$...`), legacy `$pbkdf2$...`, or plaintext (deprecated
     scheme core still accepts). Never log or emit `password` downstream.
+    `totp` is whether 2FA is enabled, or None when `auth_totp` isn't
+    installed (unknown, not "off"): a weak password behind 2FA is a lower
+    priority than one without.
     """
-    active = sql.SQL("") if include_inactive else sql.SQL("AND active = TRUE")
+    totp = sql.SQL("totp_secret IS NOT NULL") if _has_totp(cur) else sql.SQL("NULL")
     cur.execute(
-        sql.SQL("SELECT id, login, password FROM res_users WHERE password IS NOT NULL {active} ORDER BY id").format(
-            active=active
-        )
+        sql.SQL("""
+            SELECT id, login, password, share, {totp}
+            FROM res_users
+            WHERE password IS NOT NULL AND active = TRUE
+            ORDER BY id
+        """).format(totp=totp)
     )
-    return [{"user_id": row[0], "login": row[1], "password": row[2]} for row in cur.fetchall()]
+    return [
+        {"user_id": row[0], "login": row[1], "password": row[2], "share": row[3], "totp": row[4]}
+        for row in cur.fetchall()
+    ]
+
+
+def _ab64_encode(b: bytes) -> str:
+    return base64.b64encode(b).rstrip(b"=").decode().replace("+", ".")
 
 
 def _ab64_decode(s: str) -> bytes:
     """passlib's ab64: standard base64 without padding, with '+' replaced by '.'."""
-    return base64.b64decode(s.replace(".", "+") + "=" * (-len(s) % 4))
+    # validate=True: without it b64decode silently drops invalid characters,
+    # so a garbled salt would decode to b'' and never match any candidate.
+    return base64.b64decode(s.replace(".", "+") + "=" * (-len(s) % 4), validate=True)
+
+
+def hash_password(password: str) -> str:
+    """Hash like core's CryptContext does (pbkdf2_sha512, 600k rounds, 16-byte salt)."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha512", password.encode(), salt, _PBKDF2_ROUNDS)
+    return f"$pbkdf2-sha512${_PBKDF2_ROUNDS}${_ab64_encode(salt)}${_ab64_encode(digest)}"
 
 
 def parse_password_hash(stored: str) -> tuple[str, int, bytes, bytes] | None:
@@ -3713,7 +3763,8 @@ def parse_password_hash(stored: str) -> tuple[str, int, bytes, bytes] | None:
 
     Returns (scheme, rounds, salt, digest) for pbkdf2 hashes,
     ("plaintext", 0, b"", b"") for plaintext, or None for anything the
-    checker cannot reason about (empty, unknown scheme, wrong digest length).
+    checker cannot reason about (empty, unknown scheme, invalid base64,
+    empty salt, wrong digest length).
     """
     stored = stored.strip()
     if not stored:
@@ -3733,8 +3784,8 @@ def parse_password_hash(stored: str) -> tuple[str, int, bytes, bytes] | None:
         digest = _ab64_decode(parts[4])
     except (ValueError, binascii.Error):
         return None
-    # A truncated/garbled digest must not silently pass as "not weak".
-    if len(digest) != hashlib.new(algo).digest_size:
+    # A truncated/garbled digest or salt must not silently pass as "not weak".
+    if not salt or len(digest) != hashlib.new(algo).digest_size:
         return None
     return (scheme, rounds, salt, digest)
 
@@ -3748,18 +3799,24 @@ def _pbkdf2_verify(candidate: str, scheme: str, rounds: int, salt: bytes, digest
 def weak_password_candidates(login: str) -> list[tuple[str, str]]:
     """Candidate (password, reason) pairs to test for one user.
 
-    Per the audit spec: single digits, single characters, 'admin',
-    the login itself, and a small common-password list.
+    Per the audit spec: single digits, single lowercase letters, 'admin',
+    the login itself, and a small common-password list. Most real logins
+    are emails, so the local part (`john` for `john@acme.com`) counts as
+    same-as-login too.
+
+    Ordered most-likely-hit first (common list, then login, then single
+    chars): the scan stops at the first match, so a weak user costs a
+    hash or two instead of most of the list. The worst case (no match)
+    is unchanged.
     """
-    candidates: list[tuple[str, str]] = [(c, "single_char") for c in _SINGLE_CHAR_CANDIDATES]
-    for common in _COMMON_WEAK_PASSWORDS:
-        candidates.append((common, "common"))
+    candidates: list[tuple[str, str]] = [(c, "common") for c in _COMMON_WEAK_PASSWORDS]
     if login:
-        # case-insensitive same-as-login; deduped when the login is already lower-case
-        lowered = login.lower()
-        candidates.append((login, "same_as_login"))
-        if lowered != login:
-            candidates.append((lowered, "same_as_login"))
+        # case-insensitive; dict.fromkeys dedupes while keeping order
+        local = login.split("@")[0]
+        for value in dict.fromkeys((login, login.lower(), local, local.lower())):
+            if value:
+                candidates.append((value, "same_as_login"))
+    candidates.extend((c, "single_char") for c in _SINGLE_CHAR_CANDIDATES)
     return candidates
 
 
@@ -3768,11 +3825,14 @@ def check_weak_password(
     stored: str,
     *,
     candidates: list[tuple[str, str]] | None = None,
+    cancel: threading.Event | None = None,
 ) -> str | None:
     """Return the reason the stored password is weak, or None.
 
     Pure over (login, stored) so it is unit-testable without a cursor.
     Honors precomputed `candidates` for callers that want a custom list.
+    `cancel` is checked between candidates so an interrupted scan stops
+    within one pbkdf2 instead of finishing the user (returns None then).
     An empty value is no password at all (None); any other value the parser
     rejects (unknown scheme, truncated digest, ...) is reported as
     "malformed" rather than silently read as "not weak".
@@ -3786,11 +3846,13 @@ def check_weak_password(
     if scheme == "plaintext":
         # A plaintext-stored password is the finding itself, whatever its value.
         return "plaintext"
-    if rounds <= 0:
+    if not 0 < rounds <= _MAX_PBKDF2_ROUNDS:
         return "malformed"
     if candidates is None:
         candidates = weak_password_candidates(login)
     for candidate, reason in candidates:
+        if cancel is not None and cancel.is_set():
+            return None
         if _pbkdf2_verify(candidate, scheme, rounds, salt, digest):
             return reason
     return None
