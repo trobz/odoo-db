@@ -379,6 +379,12 @@ def mail(db_name: Annotated[str, typer.Argument(metavar="DB")]):
     common reason mail never leaves an Odoo database — and marks the
     stub relay it inserts (`is_neutralization_stub`) so it isn't mistaken
     for a real, working server.
+
+    Ends with the mail.mail queue — counts per state and the most common
+    failure reasons — since a relay that's configured right but refuses
+    every send (a mailbox password changed upstream) only shows there.
+    Recipient addresses in failure reasons are masked unless
+    --include-sensitive-information.
     """
     with _handle_errors(db_name), db.cursor(db_name) as cur:
         data = db.get_mail_audit(cur, reveal=_include_sensitive)
@@ -579,6 +585,30 @@ def mail(db_name: Annotated[str, typer.Argument(metavar="DB")]):
                 [[m["name"], m["state"]] for m in data["modules"]],
                 empty_msg="  (none of the tracked modules found)",
             )
+
+            queue = data["queue"]
+            w.text("\nMail queue (mail.mail):")
+            if queue is None:
+                w.text("  (mail not installed)")
+            else:
+                w.table(
+                    ["state", "count", "oldest", "newest"],
+                    [
+                        [s["state"] or "", str(s["count"]), _fmt_dt(s["oldest"]), _fmt_dt(s["newest"])]
+                        for s in queue["states"]
+                    ],
+                    empty_msg="  (empty)",
+                )
+                if queue["failure_reasons"]:
+                    w.text("\nTop failure reasons (state=exception, first line):")
+                    w.table(
+                        ["count", "first", "last", "failure_reason"],
+                        [
+                            [str(r["count"]), _fmt_dt(r["first"]), _fmt_dt(r["last"]), r["failure_reason"] or ""]
+                            for r in queue["failure_reasons"]
+                        ],
+                        fold=frozenset({"failure_reason"}),
+                    )
 
 
 # ---------------------------------------------------------------------------

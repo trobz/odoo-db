@@ -12,6 +12,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import psycopg
@@ -2695,6 +2696,98 @@ def get_mail_servers(cur: psycopg.Cursor, *, reveal: bool = False) -> list[dict]
     return rows
 
 
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+# Enough to name every distinct cause on a database that's actually failing;
+# a long tail past that is one-off recipients, not a pattern.
+_MAIL_FAILURE_REASON_LIMIT = 10
+
+
+def _has_mail_failure_reason(cur: psycopg.Cursor) -> bool:
+    """``mail_mail.failure_reason``, probed via ``pg_attribute`` like
+    ``_has_cron_failure_tracking`` — present on every version this tool
+    has been run against (12.0+), but older ones never stored a reason."""
+    cur.execute("""
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass('mail_mail') AND attname = 'failure_reason' AND NOT attisdropped
+    """)
+    return cur.fetchone() is not None
+
+
+def _group_mail_failure_reasons(rows: list[tuple], *, reveal: bool) -> list[dict]:
+    """Regroup ``(reason, count, first, last)`` rows after masking.
+
+    A refused recipient puts its address in the reason (``550 5.1.1
+    <jdoe@example.com>: user unknown``), which is both personal data — masked
+    unless ``reveal``, like ``role-drift``'s logins — and what keeps one cause
+    from grouping: masked, every "user unknown" collapses into one row.
+    Ordered by count, then most recent.
+    """
+    groups: dict[str | None, dict] = {}
+    for reason, count, first, last in rows:
+        if reason is not None and not reveal:
+            reason = _EMAIL_RE.sub(_SECRET_MASK, reason)
+        group = groups.get(reason)
+        if group is None:
+            groups[reason] = {"failure_reason": reason, "count": count, "first": first, "last": last}
+            continue
+        group["count"] += count
+        group["first"] = min(filter(None, (group["first"], first)), default=None)
+        group["last"] = max(filter(None, (group["last"], last)), default=None)
+
+    ordered = sorted(groups.values(), key=lambda g: (g["count"], g["last"] or datetime.min), reverse=True)
+    return ordered[:_MAIL_FAILURE_REASON_LIMIT]
+
+
+def get_mail_queue(cur: psycopg.Cursor, *, reveal: bool = False) -> dict | None:
+    """What happened to outgoing mail (``mail.mail``), as opposed to how it's configured.
+
+    The config sections of ``get_mail_audit`` all look fine on a database
+    whose relay rejects every login (a mailbox password changed upstream):
+    the server row is there, active, with credentials set. What gives it away
+    is the queue — every send since lands in ``exception`` with the SMTP
+    refusal as its ``failure_reason``. ``exception`` rows are also the ones
+    that stay: a ``sent`` mail is deleted right away unless the mail was
+    created with ``auto_delete`` off, so a low ``sent`` count says nothing.
+
+    ``states``: count per ``state``, with the oldest/newest ``create_date``
+    — an ``outgoing`` row from days ago is a queue nobody is processing.
+    ``failure_reasons``: ``exception`` rows grouped by the first line of
+    ``failure_reason`` (later lines are a traceback or the server's
+    multi-line reply), ``first``/``last`` by ``write_date``, i.e. the last
+    attempt. Addresses in it are masked unless ``reveal`` (see
+    ``_group_mail_failure_reasons``). ``None`` when the column is absent.
+
+    Returns ``None`` if ``mail`` isn't installed (no ``mail_mail`` table).
+    """
+    cur.execute("SELECT to_regclass('public.mail_mail')")
+    if not _fetch_one(cur)[0]:
+        return None
+
+    cur.execute("""
+        SELECT state, count(*)::int, min(create_date), max(create_date)
+        FROM mail_mail
+        GROUP BY state
+        ORDER BY count(*) DESC
+    """)
+    states = [
+        {"state": state, "count": count, "oldest": oldest, "newest": newest}
+        for state, count, oldest, newest in cur.fetchall()
+    ]
+
+    failure_reasons = None
+    if _has_mail_failure_reason(cur):
+        cur.execute("""
+            SELECT nullif(split_part(failure_reason, E'\\n', 1), ''), count(*)::int, min(write_date), max(write_date)
+            FROM mail_mail
+            WHERE state = 'exception'
+            GROUP BY 1
+        """)
+        failure_reasons = _group_mail_failure_reasons(cur.fetchall(), reveal=reveal)
+
+    return {"states": states, "failure_reasons": failure_reasons}
+
+
 def get_mail_relevant_modules(cur: psycopg.Cursor) -> list[dict]:
     """State of modules that materially change mail behavior (currently: ``mass_mailing``)."""
     cur.execute(
@@ -2800,9 +2893,14 @@ def get_mail_audit(cur: psycopg.Cursor, *, reveal: bool = False) -> dict:
     ``active=True`` filter (see ``get_mail_addresses``). ``alias_domains``
     (Odoo 17+) is the authoritative counterpart to ``config_parameters`` —
     see ``get_mail_alias_domains`` for why both are kept rather than one
-    replacing the other. ``reveal`` now only affects ``mail_servers``
-    (``smtp_pass`` is a real credential) — ``addresses`` are organizational
-    mailboxes, not masked regardless (see ``get_mail_addresses``).
+    replacing the other. ``reveal`` affects ``mail_servers`` (``smtp_pass``
+    is a real credential) and the recipient addresses in ``queue``'s failure
+    reasons — ``addresses`` are organizational mailboxes, not masked
+    regardless (see ``get_mail_addresses``).
+
+    ``queue`` (see ``get_mail_queue``) is the one section that isn't
+    configuration: what mail actually did, which is what gives away a
+    relay that's configured right but refuses every send.
 
     ``is_neutralized`` (see ``get_is_neutralized``) is the single most
     common reason mail never leaves an Odoo database — every odoo.sh
@@ -2844,6 +2942,7 @@ def get_mail_audit(cur: psycopg.Cursor, *, reveal: bool = False) -> dict:
         "addresses": get_mail_addresses(cur),
         "mail_servers": get_mail_servers(cur, reveal=reveal),
         "modules": get_mail_relevant_modules(cur),
+        "queue": get_mail_queue(cur, reveal=reveal),
     }
 
 

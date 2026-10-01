@@ -1,4 +1,5 @@
 import string
+from datetime import datetime
 
 import psycopg
 from typer.testing import CliRunner
@@ -29,6 +30,7 @@ from odoo_db.db import (
     get_mail_addresses,
     get_mail_alias_domains,
     get_mail_config_parameters,
+    get_mail_queue,
     get_mail_servers,
     get_modules,
     get_users,
@@ -1469,3 +1471,76 @@ def test_get_wkhtmltopdf_paperformat_params_returns_rows_when_installed():
         {"paperformat_id": 1, "paperformat_name": "A4", "param_name": "--dpi", "param_value": "90"},
         {"paperformat_id": 1, "paperformat_name": "A4", "param_name": "--zoom", "param_value": "1.0"},
     ]
+
+
+class _FakeMailQueueCursor:
+    """Cursor stand-in for get_mail_queue: table probe, state counts,
+    failure_reason column probe, then the exception grouping."""
+
+    def __init__(self, *, has_table=True, has_reason=True, states=(), reasons=()):
+        self._has_table = has_table
+        self._has_reason = has_reason
+        self._states = list(states)
+        self._reasons = list(reasons)
+        self._next: list = []
+
+    def execute(self, query, params=None):
+        if "to_regclass('public.mail_mail')" in query:
+            self._next = [("mail_mail" if self._has_table else None,)]
+        elif "pg_attribute" in query:
+            self._next = [(1,)] if self._has_reason else []
+        elif "GROUP BY state" in query:
+            self._next = self._states
+        else:
+            self._next = self._reasons
+
+    def fetchone(self):
+        return self._next[0] if self._next else None
+
+    def fetchall(self):
+        return self._next
+
+
+def test_get_mail_queue_none_without_mail_installed():
+    assert get_mail_queue(_FakeMailQueueCursor(has_table=False)) is None  # ty: ignore[invalid-argument-type]
+
+
+def test_get_mail_queue_counts_states_and_groups_failure_reasons():
+    sept = datetime(2026, 9, 20, 7, 20)
+    octo = datetime(2026, 10, 1, 8, 1)
+    cur = _FakeMailQueueCursor(
+        states=[("exception", 240, sept, octo), ("outgoing", 2, octo, octo)],
+        reasons=[
+            ("(535, b'5.7.0 Invalid login or password')", 238, sept, octo),
+            # Two recipients, one cause: masking the address merges them.
+            ("550 5.1.1 <jdoe@example.com>: user unknown", 1, sept, sept),
+            ("550 5.1.1 <ann.lee+x@mail.example.org>: user unknown", 1, octo, octo),
+        ],
+    )
+    result = get_mail_queue(cur)  # ty: ignore[invalid-argument-type]
+
+    assert result is not None
+    assert result["states"][0] == {"state": "exception", "count": 240, "oldest": sept, "newest": octo}
+    assert result["failure_reasons"] == [
+        {"failure_reason": "(535, b'5.7.0 Invalid login or password')", "count": 238, "first": sept, "last": octo},
+        {"failure_reason": "550 5.1.1 <********>: user unknown", "count": 2, "first": sept, "last": octo},
+    ]
+
+
+def test_get_mail_queue_reveals_recipients_when_asked():
+    when = datetime(2026, 9, 20)
+    cur = _FakeMailQueueCursor(reasons=[("550 5.1.1 <jdoe@example.com>: user unknown", 1, when, when)])
+    result = get_mail_queue(cur, reveal=True)  # ty: ignore[invalid-argument-type]
+
+    assert result is not None
+    assert result["failure_reasons"][0]["failure_reason"] == "550 5.1.1 <jdoe@example.com>: user unknown"
+
+
+def test_get_mail_queue_without_failure_reason_column():
+    cur = _FakeMailQueueCursor(has_reason=False, states=[("sent", 3, None, None)])
+    result = get_mail_queue(cur)  # ty: ignore[invalid-argument-type]
+
+    assert result == {
+        "states": [{"state": "sent", "count": 3, "oldest": None, "newest": None}],
+        "failure_reasons": None,
+    }

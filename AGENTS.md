@@ -253,6 +253,20 @@ dump won't tell you):
   `_is_test_mail_catcher`/`_known_production_relay`/
   `_is_neutralization_stub_mail_server`), `modules`
   (`get_mail_relevant_modules`, currently just `mass_mailing`).
+  A 6th section, `queue` (`get_mail_queue`, `None` without a `mail_mail`
+  table), is what mail *did* rather than how it's configured: `states`
+  (count + oldest/newest `create_date` per `mail_mail.state`) and
+  `failure_reasons` (`exception` rows grouped on the first line of
+  `failure_reason`, top 10 by count, `first`/`last` by `write_date`; `None`
+  when the column is absent). Exists because every config section looks
+  fine on a database whose relay rejects every login — only the queue shows
+  hundreds of `(535, ...)` exceptions. `sent` counts are not a delivery
+  history: Odoo deletes sent mails unless `auto_delete` is off; `exception`
+  rows stay. Recipient addresses inside a reason (`550 5.1.1 <x@y>: user
+  unknown`) are masked to `_SECRET_MASK` unless `reveal`, then rows are
+  re-aggregated in Python (`_group_mail_failure_reasons`) so one cause
+  across many recipients collapses into one row. Verified against a live
+  12.0 production database (2642 exceptions, 535 login refusals on top).
 
   `mail_servers[].smtp_user`/`smtp_pass` are masked (`_SECRET_MASK`) like any
   other secret; `--include-sensitive-information` reveals both.
