@@ -366,8 +366,13 @@ dump won't tell you):
   against trivial candidates (single digits/lowercase letters — uppercase
   dropped as ~50% extra runtime for no realistic hit — a deliberately short
   common list —
-  every candidate is one full pbkdf2, 600k rounds on 16+ (~0.2s), passlib's
-  25k default on 14/15 which have no `MIN_ROUNDS` — the login, and its email
+  every candidate is one full pbkdf2 at the rounds stored in that user's
+  hash: 600k (~0.2s) for hashes written by 15.0+ (hardcoded in 15.0 since
+  odoo/odoo `5502bec`, Dec 2023; `MIN_ROUNDS` on 16+, raisable via the
+  `password.hashing.rounds` ICP), passlib's 25k default on 14.0 and older
+  15.0 builds — and 16+ only rehashes on the user's next successful login,
+  so a migrated database keeps 25k hashes for users who haven't logged in
+  since — the login, and its email
   local part since most real logins are emails). Candidates are ordered
   most-likely-hit first (common, login, single chars) since the scan stops
   at the first match: `admin` costs 1 hash, not 37.

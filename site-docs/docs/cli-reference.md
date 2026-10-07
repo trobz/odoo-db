@@ -543,7 +543,7 @@ res_users.password, never attempts to log in.
 Logins are PII: shown only with --include-sensitive-information.
 
 CPU-heavy: ~50 full pbkdf2 verifications per user (600k rounds each on
-Odoo 16+, ~0.2-0.5s apiece), run on the local machine — with peer auth
+Odoo 15+, ~0.2-0.5s apiece), run on the local machine — with peer auth
 that is the postgres host itself. Use --workers to bound the load.
 
 **Usage**:
