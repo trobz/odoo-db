@@ -3675,8 +3675,10 @@ def generate_password(length: int = 16) -> str:
 
 # Common trivial passwords, checked in addition to the structural rules
 # (single character, same as the login). Deliberately short: every candidate
-# costs one full pbkdf2 verification per user (600k rounds on 16+ ≈ 0.2s;
-# 14.0/15.0 have no MIN_ROUNDS and use passlib's 25k default).
+# costs one full pbkdf2 verification per user, at the rounds stored in that
+# user's hash: 600k for hashes written by 15.0+ (≈ 0.2s), passlib's 25k
+# default for 14.0, 15.0 before Dec 2023 (odoo/odoo 5502bec), and any user
+# who hasn't logged in since a migration from those (16+ rehashes on login).
 _COMMON_WEAK_PASSWORDS = (
     "admin",
     "odoo",
@@ -3695,12 +3697,14 @@ _COMMON_WEAK_PASSWORDS = (
 # (~50% more runtime) for passwords nobody picks in practice.
 _SINGLE_CHAR_CANDIDATES = tuple(string.digits + string.ascii_lowercase)
 
-# Core's pbkdf2 round count (odoo/addons/base/models/res_users.py MIN_ROUNDS, 16+).
+# Core's pbkdf2 round count (odoo/addons/base/models/res_users.py: hardcoded
+# in 15.0, MIN_ROUNDS on 16+ where the `password.hashing.rounds` ICP can raise it).
 _PBKDF2_ROUNDS = 600_000
 
 # Hashes claiming more rounds than this are reported as `malformed` rather than
 # verified: rounds come from the (untrusted) stored value, and 2**31 rounds
-# would take ~18h per user. Core never writes more than _PBKDF2_ROUNDS.
+# would take ~18h per user. Core only exceeds _PBKDF2_ROUNDS when the
+# `password.hashing.rounds` ICP (16+) raises it, never anywhere near this cap.
 _MAX_PBKDF2_ROUNDS = 10_000_000
 
 
