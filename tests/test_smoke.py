@@ -1,8 +1,10 @@
 import string
+from contextlib import nullcontext
 
 import psycopg
 from typer.testing import CliRunner
 
+from odoo_db import db
 from odoo_db.db import (
     _NEUTRALIZE_SURFACES,
     NEUTRALIZED,
@@ -25,6 +27,7 @@ from odoo_db.db import (
     filter_sensitive_parameters,
     generate_password,
     get_config_parameters,
+    get_database_flags,
     get_is_neutralized,
     get_mail_addresses,
     get_mail_alias_domains,
@@ -40,6 +43,9 @@ from odoo_db.db import (
     has_tracked_cron_failures,
     live_surfaces,
     neutralization_state,
+    parse_database_flags,
+    parse_source_dump_datetime,
+    source_dump_epoch,
 )
 from odoo_db.main import app
 
@@ -883,6 +889,60 @@ def test_get_is_neutralized_false_when_key_absent():
 def test_get_is_neutralized_false_when_explicitly_false():
     cur = _FakeConfigParamCursor(("false",))
     assert get_is_neutralized(cur) is False  # ty: ignore[invalid-argument-type]
+
+
+def test_parse_database_flags():
+    assert parse_database_flags({}) == {
+        "neutralized": False,
+        "shrunk": None,
+        "anonymized": None,
+        "obfuscated": None,
+        "configured_for_safe_testing": None,
+        "source_dump_datetime": None,
+    }
+    flags = parse_database_flags({"database.is_anonymized": "false", "database.is_shrunk": "True"})
+    assert flags["anonymized"] is False
+    assert flags["shrunk"] is True
+
+
+def test_parse_source_dump_datetime():
+    assert parse_source_dump_datetime("20260519") == "2026-05-19"
+    assert parse_source_dump_datetime("2026-05-19") == "2026-05-19"
+    assert parse_source_dump_datetime("20260519T1430") == "2026-05-19T14:30:00"
+    assert parse_source_dump_datetime("2026-05-19 14:30:00") == "2026-05-19T14:30:00"
+    assert parse_source_dump_datetime("2026-05-19T14:30:00Z") == "2026-05-19T14:30:00+00:00"
+    assert parse_source_dump_datetime("20261340") == "20261340"
+
+
+def test_get_database_flags_is_one_query():
+    cur = _FakeParamsCursor([("database.is_neutralized", "true"), ("database.source_dump_datetime", "20260519")])
+    flags = get_database_flags(cur)  # ty: ignore[invalid-argument-type]
+    assert len(cur.params[0]) == 6  # ty: ignore[not-subscriptable] -- the one query covers every flag
+    assert flags["neutralized"] is True
+    assert flags["source_dump_datetime"] == "2026-05-19"
+
+
+def test_source_dump_epoch():
+    assert source_dump_epoch(None) is None
+    assert source_dump_epoch("not a date") is None
+    assert source_dump_epoch("2026-05-19") == 1779148800
+    assert source_dump_epoch("2026-05-19T14:30:00+07:00") == 1779148800 + 7 * 3600 + 30 * 60
+
+
+def test_list_text_renders_raw_values_literally(monkeypatch):
+    # Unparseable source_dump_datetime values come back raw and must print as-is.
+    dumps = {"a": "[/x]", "b": "[bold]x[/bold]"}
+    monkeypatch.setattr(db, "cursor", lambda _name: nullcontext())
+    monkeypatch.setattr(db, "list_databases", lambda _cur: list(dumps))
+    monkeypatch.setattr(
+        db,
+        "get_db_summary",
+        lambda name, verbose=False: db.DbSummary(name, "18.0", False, flags={"source_dump_datetime": dumps[name]}),
+    )
+    result = runner.invoke(app, ["list"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "[/x]" in result.output
+    assert "[bold]x[/bold]" in result.output
 
 
 class _FakeAliasDomainCursor:

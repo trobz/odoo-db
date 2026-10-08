@@ -12,6 +12,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import psycopg
@@ -137,7 +138,77 @@ def get_is_neutralized(cur: psycopg.Cursor) -> bool:
     report every neutralized database as not neutralized)."""
     cur.execute("SELECT value FROM ir_config_parameter WHERE key = 'database.is_neutralized'")
     row = cur.fetchone()
-    return bool(row) and str(row[0]).strip().lower() in ("true", "t", "1")
+    return bool(row) and _param_is_true(row[0])
+
+
+def _param_is_true(value: object) -> bool:
+    return str(value).strip().lower() in ("true", "t", "1")
+
+
+# Explicit list, not `LIKE 'database.%'`: that prefix also holds `database.secret`.
+_DATABASE_BOOL_FLAGS: tuple[tuple[str, str], ...] = (
+    ("database.is_neutralized", "neutralized"),
+    ("database.is_shrunk", "shrunk"),
+    ("database.is_anonymized", "anonymized"),
+    ("database.is_obfuscated", "obfuscated"),
+    ("database.is_configured_for_safe_testing", "configured_for_safe_testing"),
+)
+_SOURCE_DUMP_DATETIME_KEY = "database.source_dump_datetime"
+_DATABASE_FLAG_KEYS = [key for key, _ in _DATABASE_BOOL_FLAGS] + [_SOURCE_DUMP_DATETIME_KEY]
+
+_COMPACT_DATE_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+_COMPACT_DATETIME_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})[T _-]?(\d{2})(\d{2})(\d{2})?$")
+
+
+def parse_source_dump_datetime(value: str) -> str:
+    """Normalize a compact (`20260519[T143000]`) or ISO date/datetime to ISO 8601.
+    Unparseable values are returned as-is."""
+    raw = value.strip()
+    if not raw:
+        return raw
+    try:
+        if m := _COMPACT_DATE_RE.match(raw):
+            return date(*map(int, m.groups())).isoformat()
+        if m := _COMPACT_DATETIME_RE.match(raw):
+            year, month, day, hour, minute, second = m.groups()
+            return datetime(int(year), int(month), int(day), int(hour), int(minute), int(second or 0)).isoformat()
+        if len(raw) == 10:
+            return date.fromisoformat(raw).isoformat()
+        # Python 3.10's fromisoformat rejects the `Z` suffix.
+        return datetime.fromisoformat(raw[:-1] + "+00:00" if raw[-1] in "Zz" else raw).isoformat()
+    except ValueError:
+        logger.warning("unparseable %s value: %r", _SOURCE_DUMP_DATETIME_KEY, value)
+        return raw
+
+
+def parse_database_flags(values: dict[str, str]) -> dict[str, bool | str | None]:
+    """`neutralized` stays a plain bool (back-compat); other flags are None when the key is absent."""
+    flags: dict[str, bool | str | None] = {
+        name: None if values.get(key) is None else _param_is_true(values[key]) for key, name in _DATABASE_BOOL_FLAGS
+    }
+    flags["neutralized"] = bool(flags["neutralized"])
+    dump = values.get(_SOURCE_DUMP_DATETIME_KEY)
+    flags["source_dump_datetime"] = None if dump is None else parse_source_dump_datetime(dump)
+    return flags
+
+
+def get_database_flags(cur: psycopg.Cursor) -> dict[str, bool | str | None]:
+    """All flags in one query: `list` runs this per database."""
+    cur.execute("SELECT key, value FROM ir_config_parameter WHERE key = ANY(%s)", (_DATABASE_FLAG_KEYS,))
+    return parse_database_flags(dict(cur.fetchall()))
+
+
+def source_dump_epoch(value: bool | str | None) -> int | None:
+    """Unix seconds for the prometheus gauge; naive values are read as UTC."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
 
 
 def list_databases(cur: psycopg.Cursor) -> list[str]:
@@ -155,6 +226,7 @@ class DbSummary:
     name: str
     version: str
     neutralized: bool
+    flags: dict[str, bool | str | None]
     module_count: int | None = None
     user_count: int | None = None
 
@@ -173,7 +245,8 @@ def get_db_summary(dbname: str, verbose: bool = False) -> DbSummary | None:
             parts = row[0].split(".")
             version = ".".join(parts[:2]) if len(parts) >= 2 else row[0]
 
-            neutralized = get_is_neutralized(cur)
+            flags = get_database_flags(cur)
+            neutralized = bool(flags.pop("neutralized"))
 
             module_count = user_count = None
             if verbose:
@@ -188,6 +261,7 @@ def get_db_summary(dbname: str, verbose: bool = False) -> DbSummary | None:
                 neutralized=neutralized,
                 module_count=module_count,
                 user_count=user_count,
+                flags=flags,
             )
     except Exception as exc:
         logger.warning("skipping %s: %s", dbname, exc)

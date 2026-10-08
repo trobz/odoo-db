@@ -39,7 +39,7 @@ odoo-db [OPTIONS] COMMAND [DB]
 
 | Command | Description |
 |---------|-------------|
-| `list` | List all Odoo DBs with version and neutralization status |
+| `list` | List all Odoo DBs with version, neutralization status and `database.*` flags (`is_shrunk`, `is_anonymized`, `is_obfuscated`, `is_configured_for_safe_testing`, `source_dump_datetime`); `null` = key not set |
 | `modules <db>` | List installed modules with version |
 | `crons <db>` | List active scheduled actions (`--all` also includes inactive ones). `--running` shows crons currently held by an Odoo worker (RowShareLock on `ir_cron`) — transient debug data, not bundled into `prepare-audit`. `--include-code` adds the python source of each `state='code'` cron (ignored with `--running`, which already always shows it). On Odoo 18+, also surfaces `failure_count`/`first_failure_date` (both modes) and `--running`'s live `done`/`remaining`/`timed_out_counter` progress — omitted entirely on older databases; JSON always includes the keys, the text table only shows the corresponding columns when a row actually has a nonzero value. `--output-format prometheus` adds a `odoo_db_crons_failing` gauge (active crons with `failure_count > 0`, Odoo 18+ only, unaffected by `--all`) alongside the existing `odoo_db_crons_active` |
 | `jobs <db>` | Queue job counts by state (requires `queue_job` module) |

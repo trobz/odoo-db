@@ -57,7 +57,7 @@ $ odoo-db [OPTIONS] COMMAND [ARGS]...
 
 ## `odoo-db list`
 
-List all Odoo databases: name, version, neutralized status.
+List all Odoo databases: name, version, neutralized status and `database.*` flags.
 
 **Usage**:
 
