@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.27.0 (2026-10-12)
+
+### Bug Fixes
+
+- **list**: Treat database.is_neutralized like the other flags
+  ([`89f5712`](https://github.com/trobz/odoo-db/commit/89f57124e2a78f6279d35c819adff54411853d8f))
+
+### Features
+
+- **list**: Read database.* flags in one query
+  ([`c9f59dd`](https://github.com/trobz/odoo-db/commit/c9f59dd368ab3c63b3f78630357605e2c2346c22))
+
+
 ## v1.26.0 (2026-09-28)
 
 ### Bug Fixes
