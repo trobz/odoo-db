@@ -28,7 +28,8 @@ Odoo locally.
 
 - `odoo_db/main.py` — CLI entry point (`odoo-db` command)
 - `odoo_db/db.py` — all DB queries (psycopg3)
-- `odoo_db/output.py` — output formatting (text/json/prometheus)
+- `odoo_db/output.py` — output formatting (text/json/prometheus); `Writer.table`
+  renders cells literally (no Rich markup), so a DB value like `[/x]` can't break a table
 
 ## CLI Structure
 
@@ -130,6 +131,15 @@ dump won't tell you):
   `user_id` only when the global `--include-sensitive-information` flag is
   set, threaded through as `compute_role_drift(..., include_sensitive=...)`
   — same PII-redaction convention `attachments` uses for filenames.
+- `list` also reads `database.is_shrunk`/`is_anonymized`/`is_obfuscated`/
+  `is_configured_for_safe_testing`/`source_dump_datetime` in **one query**
+  (`db.get_database_flags`, explicit allowlist — never `LIKE 'database.%'`,
+  which would pull `database.secret`). Every flag is `None` when the key is
+  absent, `neutralized` included.
+  `source_dump_datetime` is normalized to ISO (date or datetime). Text shows
+  every flag column in `db.DATABASE_FLAG_NAMES` order. Prometheus: bool flags as
+  `odoo_db_info` labels + `odoo_db_source_dump_timestamp_seconds`.
+  `prepare-audit` carries the same keys.
 - `prepare-audit` writes `<db>.json` to the current working directory.
   `model_owners` is derived from `ir_model_data` + `ir_model_relation`
   (authoritative, not heuristic). `orphan_tables` carries a `reason`:
@@ -438,8 +448,8 @@ dump won't tell you):
 ```sql
 -- Odoo version (keep first 2 numbers)
 SELECT latest_version FROM ir_module_module WHERE name = 'base';
--- Neutralized?
-SELECT value FROM ir_config_parameter WHERE key = 'database.is_neutralized';
+-- Neutralized + other database.* flags, one query (explicit allowlist)
+SELECT key, value FROM ir_config_parameter WHERE key = ANY(%s);
 -- Verbose: installed module count
 SELECT count(*) FROM ir_module_module WHERE state = 'installed';
 -- Verbose: user count

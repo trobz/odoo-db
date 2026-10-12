@@ -6,6 +6,7 @@ from typing import Any
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 
 def _open(output_file: str | None):
@@ -52,7 +53,8 @@ class Writer:
                 overflow="fold" if fold and h in fold else "ellipsis",
             )
         for row in rows:
-            t.add_row(*row)
+            # Literal text, not Rich markup: a DB value like `[/x]` would crash the table.
+            t.add_row(*(Text(cell) if isinstance(cell, str) else cell for cell in row))
         console = Console(file=self._f)
         console.print(t)
 
