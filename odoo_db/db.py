@@ -148,13 +148,15 @@ def _param_is_true(value: object) -> bool:
 # Explicit list, not `LIKE 'database.%'`: that prefix also holds `database.secret`.
 _DATABASE_BOOL_FLAGS: tuple[tuple[str, str], ...] = (
     ("database.is_neutralized", "neutralized"),
+    ("database.is_configured_for_safe_testing", "configured_for_safe_testing"),
     ("database.is_shrunk", "shrunk"),
     ("database.is_anonymized", "anonymized"),
     ("database.is_obfuscated", "obfuscated"),
-    ("database.is_configured_for_safe_testing", "configured_for_safe_testing"),
 )
 _SOURCE_DUMP_DATETIME_KEY = "database.source_dump_datetime"
 _DATABASE_FLAG_KEYS = [key for key, _ in _DATABASE_BOOL_FLAGS] + [_SOURCE_DUMP_DATETIME_KEY]
+# `list` column order.
+DATABASE_FLAG_NAMES = ("source_dump_datetime", *(name for _, name in _DATABASE_BOOL_FLAGS))
 
 _COMPACT_DATE_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
 _COMPACT_DATETIME_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})[T _-]?(\d{2})(\d{2})(\d{2})?$")
@@ -182,14 +184,12 @@ def parse_source_dump_datetime(value: str) -> str:
 
 
 def parse_database_flags(values: dict[str, str]) -> dict[str, bool | str | None]:
-    """`neutralized` stays a plain bool (back-compat); other flags are None when the key is absent."""
+    """None when the key is absent, so "not set" differs from false."""
     flags: dict[str, bool | str | None] = {
         name: None if values.get(key) is None else _param_is_true(values[key]) for key, name in _DATABASE_BOOL_FLAGS
     }
-    flags["neutralized"] = bool(flags["neutralized"])
     dump = values.get(_SOURCE_DUMP_DATETIME_KEY)
-    flags["source_dump_datetime"] = None if dump is None else parse_source_dump_datetime(dump)
-    return flags
+    return {"source_dump_datetime": None if dump is None else parse_source_dump_datetime(dump), **flags}
 
 
 def get_database_flags(cur: psycopg.Cursor) -> dict[str, bool | str | None]:
@@ -225,7 +225,6 @@ def list_databases(cur: psycopg.Cursor) -> list[str]:
 class DbSummary:
     name: str
     version: str
-    neutralized: bool
     flags: dict[str, bool | str | None]
     module_count: int | None = None
     user_count: int | None = None
@@ -246,7 +245,6 @@ def get_db_summary(dbname: str, verbose: bool = False) -> DbSummary | None:
             version = ".".join(parts[:2]) if len(parts) >= 2 else row[0]
 
             flags = get_database_flags(cur)
-            neutralized = bool(flags.pop("neutralized"))
 
             module_count = user_count = None
             if verbose:
@@ -258,7 +256,6 @@ def get_db_summary(dbname: str, verbose: bool = False) -> DbSummary | None:
             return DbSummary(
                 name=dbname,
                 version=version,
-                neutralized=neutralized,
                 module_count=module_count,
                 user_count=user_count,
                 flags=flags,

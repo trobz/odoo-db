@@ -134,10 +134,10 @@ dump won't tell you):
 - `list` also reads `database.is_shrunk`/`is_anonymized`/`is_obfuscated`/
   `is_configured_for_safe_testing`/`source_dump_datetime` in **one query**
   (`db.get_database_flags`, explicit allowlist — never `LIKE 'database.%'`,
-  which would pull `database.secret`). New flags are `None` when the key is
-  absent; `neutralized` stays a plain bool for back-compat.
-  `source_dump_datetime` is normalized to ISO (date or datetime). Text shows a
-  flag column only when some DB has the key. Prometheus: bool flags as
+  which would pull `database.secret`). Every flag is `None` when the key is
+  absent, `neutralized` included.
+  `source_dump_datetime` is normalized to ISO (date or datetime). Text shows
+  every flag column in `db.DATABASE_FLAG_NAMES` order. Prometheus: bool flags as
   `odoo_db_info` labels + `odoo_db_source_dump_timestamp_seconds`.
   `prepare-audit` carries the same keys.
 - `prepare-audit` writes `<db>.json` to the current working directory.

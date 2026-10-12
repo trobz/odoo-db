@@ -106,15 +106,6 @@ def _writer() -> output.Writer:
 # ---------------------------------------------------------------------------
 
 
-_LIST_FLAG_HEADERS: dict[str, str] = {
-    "shrunk": "shrunk",
-    "anonymized": "anonymized",
-    "obfuscated": "obfuscated",
-    "configured_for_safe_testing": "configured_for_safe_testing",
-    "source_dump_datetime": "source_dump",
-}
-
-
 def _flag_cell(value: bool | str | None) -> str:
     if value is None:
         return "-"
@@ -138,7 +129,6 @@ def cmd_list(
                 {
                     "db": s.name,
                     "version": s.version,
-                    "neutralized": s.neutralized,
                     **s.flags,
                     **({"modules": s.module_count, "users": s.user_count} if verbose else {}),
                 }
@@ -149,7 +139,7 @@ def cmd_list(
             lines.append("# HELP odoo_db_info Odoo database metadata")
             lines.append("# TYPE odoo_db_info gauge")
             for s in summaries:
-                labels = f'db="{s.name}",version="{s.version}",neutralized="{str(s.neutralized).lower()}"'
+                labels = f'db="{s.name}",version="{s.version}"'
                 labels += "".join(f',{k}="{str(v).lower()}"' for k, v in s.flags.items() if isinstance(v, bool))
                 lines.append(f"odoo_db_info{{{labels}}} 1")
                 if verbose:
@@ -164,21 +154,19 @@ def cmd_list(
                 lines.extend(f'odoo_db_source_dump_timestamp_seconds{{db="{name}"}} {ts}' for name, ts in dumps)
             w.prometheus(lines)
         else:
-            flag_keys = [k for k in _LIST_FLAG_HEADERS if any(s.flags.get(k) is not None for s in summaries)]
-            headers = ["database", "version", "neutralized", *(_LIST_FLAG_HEADERS[k] for k in flag_keys)]
+            headers = ["database", "version", *db.DATABASE_FLAG_NAMES]
             if verbose:
                 headers += ["modules", "users"]
             rows = [
                 [
                     s.name,
                     s.version,
-                    "yes" if s.neutralized else "no",
-                    *(_flag_cell(s.flags.get(k)) for k in flag_keys),
+                    *(_flag_cell(s.flags.get(k)) for k in db.DATABASE_FLAG_NAMES),
                     *([str(s.module_count), str(s.user_count)] if verbose else []),
                 ]
                 for s in summaries
             ]
-            w.table(headers, rows, empty_msg="No Odoo databases found.", fold=frozenset({"database", "source_dump"}))
+            w.table(headers, rows, empty_msg="No Odoo databases found.", fold=frozenset(headers))
 
 
 # ---------------------------------------------------------------------------
@@ -1733,7 +1721,6 @@ def cmd_prepare_audit(
     payload = {
         "db": summary.name,
         "version": summary.version,
-        "neutralized": summary.neutralized,
         **summary.flags,
         "module_count": summary.module_count,
         "user_count": summary.user_count,

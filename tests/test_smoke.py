@@ -892,14 +892,9 @@ def test_get_is_neutralized_false_when_explicitly_false():
 
 
 def test_parse_database_flags():
-    assert parse_database_flags({}) == {
-        "neutralized": False,
-        "shrunk": None,
-        "anonymized": None,
-        "obfuscated": None,
-        "configured_for_safe_testing": None,
-        "source_dump_datetime": None,
-    }
+    empty = parse_database_flags({})
+    assert list(empty) == list(db.DATABASE_FLAG_NAMES)
+    assert all(value is None for value in empty.values())
     flags = parse_database_flags({"database.is_anonymized": "false", "database.is_shrunk": "True"})
     assert flags["anonymized"] is False
     assert flags["shrunk"] is True
@@ -937,10 +932,11 @@ def test_list_text_renders_raw_values_literally(monkeypatch):
     monkeypatch.setattr(
         db,
         "get_db_summary",
-        lambda name, verbose=False: db.DbSummary(name, "18.0", False, flags={"source_dump_datetime": dumps[name]}),
+        lambda name, verbose=False: db.DbSummary(name, "18.0", flags={"source_dump_datetime": dumps[name]}),
     )
     result = runner.invoke(app, ["list"], env={"COLUMNS": "200"})
     assert result.exit_code == 0, result.output
+    assert all(name in result.output for name in db.DATABASE_FLAG_NAMES)  # every column, even unset ones
     assert "[/x]" in result.output
     assert "[bold]x[/bold]" in result.output
 
