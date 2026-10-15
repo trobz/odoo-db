@@ -240,6 +240,7 @@ $ odoo-db users [OPTIONS] DB
 
 * `--all`: Also include archived users.
 * `--online`: Only show users currently online.
+* `--sort-last-login`: Add a last-login column and sort by it (most recent first, never-logged-in last).
 * `--help`: Show this message and exit.
 
 ## `odoo-db groups`

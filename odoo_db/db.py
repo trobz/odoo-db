@@ -585,50 +585,91 @@ def get_jobs(cur: psycopg.Cursor) -> list[dict] | None:
     return [{"state": row[0], "count": row[1]} for row in cur.fetchall()]
 
 
-def get_users(cur: psycopg.Cursor, *, include_inactive: bool = False) -> list[dict]:
+def get_users(cur: psycopg.Cursor, *, include_inactive: bool = False, include_last_login: bool = False) -> list[dict]:
     cur.execute("SELECT tablename FROM pg_tables WHERE tablename IN ('mail_presence', 'bus_presence')")
     presence_tables = {row[0] for row in cur.fetchall()}
 
     where_clause = sql.SQL("") if include_inactive else sql.SQL("WHERE ru.active = TRUE")
 
+    # `res.users.login_date` is a *non-stored* related field
+    # (`related='log_ids.create_date'`) on every version 12..19 — there is no
+    # `login_date` column to select. The last login is the newest
+    # `res_users_log` row for the user (`create_uid` is the One2many inverse);
+    # Odoo keeps only the latest row per user on newer versions and lets it
+    # accumulate on older ones, so `MAX(create_date)` is the version-agnostic
+    # "last login". Only joined/selected when requested, so the default query
+    # (and its byte-identical shape) is untouched.
+    if include_last_login:
+        last_login_col = sql.SQL("ull.last_login")
+        last_login_join = sql.SQL("""
+            LEFT JOIN (
+                SELECT create_uid AS uid, MAX(create_date) AS last_login
+                FROM res_users_log GROUP BY create_uid
+            ) ull ON ull.uid = ru.id
+        """)
+    else:
+        last_login_col = sql.SQL("NULL")
+        last_login_join = sql.SQL("")
+
     if "mail_presence" in presence_tables:
         # Odoo 19+: mail.presence with direct status column
         query = sql.SQL("""
-            SELECT ru.login, rp.name, COALESCE(mp.status, 'offline') AS state, ru.active
+            SELECT ru.login, rp.name, COALESCE(mp.status, 'offline') AS state, ru.active, {last_login_col}
             FROM res_users ru
             LEFT JOIN res_partner rp ON ru.partner_id = rp.id
             LEFT JOIN mail_presence mp ON mp.user_id = ru.id
+            {last_login_join}
             {where}
             ORDER BY ru.login
         """)
     elif "bus_presence" in presence_tables:
         # Odoo 14-18: bus.presence.status is updated in real-time (HTTP and WebSocket)
         query = sql.SQL("""
-            SELECT ru.login, rp.name, COALESCE(bp.status, 'offline') AS state, ru.active
+            SELECT ru.login, rp.name, COALESCE(bp.status, 'offline') AS state, ru.active, {last_login_col}
             FROM res_users ru
             LEFT JOIN res_partner rp ON ru.partner_id = rp.id
             LEFT JOIN bus_presence bp ON bp.user_id = ru.id
+            {last_login_join}
             {where}
             ORDER BY ru.login
         """)
     else:
         query = sql.SQL("""
-            SELECT ru.login, rp.name, 'unknown' AS state, ru.active
+            SELECT ru.login, rp.name, 'unknown' AS state, ru.active, {last_login_col}
             FROM res_users ru
             LEFT JOIN res_partner rp ON ru.partner_id = rp.id
+            {last_login_join}
             {where}
             ORDER BY ru.login
         """)
-    cur.execute(query.format(where=where_clause))
+    cur.execute(query.format(where=where_clause, last_login_col=last_login_col, last_login_join=last_login_join))
     return [
         {
             "login": row[0],
             "name": row[1] or "",
             "state": row[2],
+            # Newest res_users_log.create_date for the user, or None if the
+            # account never logged in. Gated like `active`: the default shape
+            # stays byte-identical for odoo-activity's TUI and the MCP db_query.
+            **({"last_login": row[4].isoformat() if row[4] else None} if include_last_login else {}),
             **({"active": bool(row[3])} if include_inactive else {}),
         }
         for row in cur.fetchall()
     ]
+
+
+def sort_users_by_last_login(rows: list[dict]) -> list[dict]:
+    """Sort users by ``last_login`` most-recent first, never-logged-in last.
+
+    Pure over the ``get_users`` row shape (``last_login`` is an ISO string or
+    ``None``); ISO timestamps sort chronologically as plain strings. Applied
+    in ``main.py`` after the fetch, like ``filter_online_users`` — the
+    prometheus branch keeps its own ordering-agnostic counting.
+    """
+    dated = [r for r in rows if r["last_login"]]
+    never = [r for r in rows if not r["last_login"]]
+    dated.sort(key=lambda r: r["last_login"], reverse=True)
+    return dated + never
 
 
 def filter_online_users(rows: list[dict]) -> list[dict]:
@@ -650,6 +691,46 @@ def get_users_by_year(cur: psycopg.Cursor) -> dict[int, int]:
         ORDER BY yr
     """)
     return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def get_users_last_login(cur: psycopg.Cursor) -> dict:
+    """Return anonymized last-login activity for active users.
+
+    ``{"by_year": {year: count}, "by_month": {"YYYY-MM": count}, "never":
+    count}`` bucketed by each active user's last login, with a separate
+    ``never`` bucket for accounts that never logged in. ``by_year`` is derived
+    from the monthly buckets (``YYYY-MM`` keys, which sort chronologically as
+    strings) so the two always agree. Aggregate only — no PII (no
+    login/name/email) — the same NDA-free contract as ``get_users_by_year``.
+
+    Last login is ``MAX(res_users_log.create_date)`` per user: ``login_date``
+    is a non-stored related field (no column) on every version 12..19, so the
+    newest ``res.users.log`` row is the source of truth — see ``get_users``.
+    """
+    cur.execute("""
+        WITH last AS (
+            SELECT create_uid AS uid, MAX(create_date) AS last_login
+            FROM res_users_log GROUP BY create_uid
+        )
+        SELECT to_char(last.last_login, 'YYYY-MM') AS ym, count(*)
+        FROM res_users ru
+        JOIN last ON last.uid = ru.id
+        WHERE ru.active = true
+        GROUP BY ym
+        ORDER BY ym
+    """)
+    by_month = {row[0]: row[1] for row in cur.fetchall()}
+    by_year: dict[int, int] = {}
+    for ym, count in by_month.items():
+        year = int(ym[:4])
+        by_year[year] = by_year.get(year, 0) + count
+    cur.execute("""
+        SELECT count(*) FROM res_users ru
+        WHERE ru.active = true
+          AND NOT EXISTS (SELECT 1 FROM res_users_log l WHERE l.create_uid = ru.id)
+    """)
+    never = _fetch_one(cur)[0]
+    return {"by_year": by_year, "by_month": by_month, "never": never}
 
 
 def _localize(value: dict[str, str | None] | str | None, lang: str = "en_US") -> str:

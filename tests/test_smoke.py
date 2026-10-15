@@ -1,5 +1,6 @@
 import string
 from contextlib import nullcontext
+from datetime import datetime
 
 import psycopg
 from typer.testing import CliRunner
@@ -35,6 +36,7 @@ from odoo_db.db import (
     get_mail_servers,
     get_modules,
     get_users,
+    get_users_last_login,
     get_wkhtmltopdf_config_parameters,
     get_wkhtmltopdf_paperformat_params,
     get_wkhtmltopdf_relevant_modules,
@@ -45,6 +47,7 @@ from odoo_db.db import (
     neutralization_state,
     parse_database_flags,
     parse_source_dump_datetime,
+    sort_users_by_last_login,
     source_dump_epoch,
 )
 from odoo_db.main import app
@@ -1030,6 +1033,9 @@ class _FakeSeqCursor:
     def fetchall(self):
         return self._current
 
+    def fetchone(self):
+        return self._current[0] if self._current else None
+
 
 # (name, latest_version, auto_install, state)
 _MODULE_ROWS = [("base", "19.0.1.0", False, "installed"), ("sale", "19.0.1.0", False, "uninstalled")]
@@ -1079,6 +1085,44 @@ def test_filter_online_users():
         {"login": "no_presence", "state": "unknown"},
     ]
     assert filter_online_users(rows) == [{"login": "on", "state": "online"}]
+
+
+def test_get_users_include_last_login_adds_key():
+    # (login, name, state, active, last_login) — last_login is the newest
+    # res_users_log.create_date; never-logged-in user has NULL.
+    rows = [
+        ("admin", "Mitchell Admin", "offline", True, datetime(2024, 5, 1, 9, 30)),
+        ("new", "Fresh Hire", "offline", True, None),
+    ]
+    cur = _FakeSeqCursor([("mail_presence",)], rows)
+    result = get_users(cur, include_last_login=True)  # ty: ignore[invalid-argument-type]
+    assert result[0]["last_login"] == "2024-05-01T09:30:00"
+    assert result[1]["last_login"] is None
+    # Gated key: still absent from the byte-identical default shape.
+    assert "last_login" not in get_users(_FakeSeqCursor([("mail_presence",)], rows[:1]))[0]  # ty: ignore[invalid-argument-type]
+
+
+def test_get_users_last_login_derives_year_from_month():
+    # First execute() -> monthly buckets; second -> never-logged-in count.
+    cur = _FakeSeqCursor(
+        [("2023-11", 1), ("2024-01", 3), ("2024-05", 2)],
+        [(4,)],
+    )
+    result = get_users_last_login(cur)  # ty: ignore[invalid-argument-type]
+    assert result["by_month"] == {"2023-11": 1, "2024-01": 3, "2024-05": 2}
+    # by_year is the per-year sum of the monthly buckets.
+    assert result["by_year"] == {2023: 1, 2024: 5}
+    assert result["never"] == 4
+
+
+def test_sort_users_by_last_login():
+    rows = [
+        {"login": "never", "last_login": None},
+        {"login": "older", "last_login": "2023-01-01T00:00:00"},
+        {"login": "newer", "last_login": "2024-06-01T12:00:00"},
+    ]
+    # Most recent first, never-logged-in last.
+    assert [r["login"] for r in sort_users_by_last_login(rows)] == ["newer", "older", "never"]
 
 
 def test_has_cron_failure_data():

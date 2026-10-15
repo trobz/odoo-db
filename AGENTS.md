@@ -145,6 +145,16 @@ dump won't tell you):
   (authoritative, not heuristic). `orphan_tables` carries a `reason`:
   `uninstalled_module` or `no_ownership_data`. `users_by_year` is
   `{year: count}` — zero PII so the file can ship without an NDA.
+  `users_last_login` is the activity counterpart —
+  `{"by_year": {year: count}, "by_month": {"YYYY-MM": count}, "never": count}`,
+  active users bucketed by their last login with a `never` bucket for accounts
+  that never logged in. Last login is `MAX(res_users_log.create_date)` per user
+  (`login_date` is a non-stored related field with no column — see
+  `users --sort-last-login` above), `never` = active users with no
+  `res_users_log` row. `by_year` is derived in Python from the monthly buckets
+  (`YYYY-MM` keys sort chronologically as strings) so the two always agree —
+  the same aggregate-only, NDA-free contract (`never` also goes in the echo
+  summary line).
   `studio_customizations` carries custom models (with `mixins` list),
   extended models (with full `fields` detail), and studio-flagged records
   by type (menu records include `full_path`).
@@ -234,6 +244,26 @@ dump won't tell you):
   unit-tested without a cursor) applied in `main.py` *after* the fetch, so the
   prometheus branch still counts every row and the gauges don't move — same
   rule as `--all`.
+- `users --sort-last-login` adds a `last_login` key (ISO string or `None`)
+  and sorts most-recent first, never-logged-in last via
+  `db.sort_users_by_last_login()` (a pure list-of-dicts function, unit-tested
+  without a cursor like `filter_online_users`; ISO timestamps sort
+  chronologically as plain strings, so it partitions into dated rows sorted
+  descending then the `None` rows appended). `res.users.login_date` is a
+  **non-stored** related field (`related='log_ids.create_date'`, no
+  `store=True`) on every version 12..19 — there is **no `login_date` column**
+  (verified against live v12 and v18 DBs: `SELECT login_date FROM res_users`
+  errors). Last login is instead `MAX(res_users_log.create_date)` grouped by
+  `create_uid` (the One2many inverse) via a `LEFT JOIN` subquery aliased
+  `ull`; Odoo keeps only the newest log row per user on recent versions and
+  lets it accumulate on older ones, so `MAX` is version-agnostic. The join +
+  column are added **only** when the flag is set
+  (`get_users(..., include_last_login=...)`) — gated exactly like `active`
+  behind `--all` so the default no-flag query (and its byte-identical shape)
+  is untouched for `odoo-activity`'s TUI and MCP `db_query`. The sort runs in
+  `main.py` after the fetch (and after any `--online` filter), so the
+  prometheus branch still counts every row and the gauges don't move. Text
+  shows `never` for a null `last_login`.
 - `params` prints `ir_config_parameter` key/value pairs; it's a local debug
   tool, not part of `prepare-audit`. Optional `[PATTERN]` arg does a
   case-insensitive substring match on `key` (`ILIKE '%pattern%'`). Values of

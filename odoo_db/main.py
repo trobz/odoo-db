@@ -703,13 +703,22 @@ def users(
         bool,
         typer.Option("--online", help="Only show users currently online."),
     ] = False,
+    sort_last_login: Annotated[
+        bool,
+        typer.Option(
+            "--sort-last-login",
+            help="Add a last-login column and sort by it (most recent first, never-logged-in last).",
+        ),
+    ] = False,
 ):
     """List users for a database."""
     with _handle_errors(db_name), db.cursor(db_name) as cur:
-        rows_data = db.get_users(cur, include_inactive=include_inactive)
+        rows_data = db.get_users(cur, include_inactive=include_inactive, include_last_login=sort_last_login)
 
     # The gauges below count the full set, so --online only narrows the listing.
     display_rows = db.filter_online_users(rows_data) if online else rows_data
+    if sort_last_login:
+        display_rows = db.sort_users_by_last_login(display_rows)
 
     with _writer() as w:
         if w.fmt == "json":
@@ -727,16 +736,21 @@ def users(
                 f'odoo_db_users_connected{{db="{db_name}"}} {connected}',
             ]
             w.prometheus(lines)
-        elif include_inactive:
-            w.table(
-                ["login", "name", "state", "active"],
-                [[r["login"], r["name"], r["state"], str(r["active"])] for r in display_rows],
-            )
         else:
-            w.table(
-                ["login", "name", "state"],
-                [[r["login"], r["name"], r["state"]] for r in display_rows],
-            )
+            headers = ["login", "name", "state"]
+            if include_inactive:
+                headers.append("active")
+            if sort_last_login:
+                headers.append("last_login")
+            rows = []
+            for r in display_rows:
+                row = [r["login"], r["name"], r["state"]]
+                if include_inactive:
+                    row.append(str(r["active"]))
+                if sort_last_login:
+                    row.append(r["last_login"] or "never")
+                rows.append(row)
+            w.table(headers, rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1707,6 +1721,7 @@ def cmd_prepare_audit(
             stats_data = db.get_stats(cur, years=years, top=top, model_owners=model_owners)
             not_odoo_data = db.get_not_odoo(cur)
             users_by_year = db.get_users_by_year(cur)
+            users_last_login = db.get_users_last_login(cur)
             studio_data = db.get_studio_customizations(cur)
             orphan_fields = db.get_orphan_fields(cur)
             customized_records = db.get_customized_system_records(cur, exclude_logins=exclude_logins)
@@ -1729,6 +1744,7 @@ def cmd_prepare_audit(
         "model_owners": model_owners,
         "orphan_tables": orphan_tables,
         "users_by_year": users_by_year,
+        "users_last_login": users_last_login,
         "stats": _compact_stats(stats_data),
         "not_odoo": not_odoo_data,
         "studio_customizations": studio_data,
@@ -1752,6 +1768,7 @@ def cmd_prepare_audit(
         f"(modules={len(modules_data)}, owners={len(model_owners)}, "
         f"tables={len(stats_data['tables'])}, orphans={len(orphan_tables)}, "
         f"user_years={len(users_by_year)}, "
+        f"never_logged_in={users_last_login['never']}, "
         f"views={len(not_odoo_data['views'])}, triggers={len(not_odoo_data['triggers'])}, "
         f"functions={len(not_odoo_data['functions'])}, procedures={len(not_odoo_data['procedures'])}, "
         f"studio_models={studio_data['custom_model_count']}, "
