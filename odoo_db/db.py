@@ -585,21 +585,96 @@ def get_jobs(cur: psycopg.Cursor) -> list[dict] | None:
     return [{"state": row[0], "count": row[1]} for row in cur.fetchall()]
 
 
-def get_users(cur: psycopg.Cursor, *, include_inactive: bool = False, include_last_login: bool = False) -> list[dict]:
+def _has_totp_secret(cur: psycopg.Cursor) -> bool:
+    """`auth_totp` installed: `res_users.totp_secret` exists. It's exposed as a
+    computed Char with `groups=NO_ACCESS`, but `_compute_totp_secret` reads a
+    real `totp_secret` column via raw SQL, so the physical column is present
+    wherever the module is (verified on live v18). Probed via `pg_attribute`
+    pinned to `to_regclass('res_users')` like `_has_cron_failure_tracking`."""
+    cur.execute("""
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass('res_users') AND attname = 'totp_secret' AND NOT attisdropped
+    """)
+    return cur.fetchone() is not None
+
+
+def _has_passkey(cur: psycopg.Cursor) -> bool:
+    """`auth_passkey` installed (Odoo 18+): the `auth_passkey_key` table exists.
+    Each row is one registered passkey; `create_uid` is the owning user (the
+    `res.users.auth_passkey_key_ids` One2many inverse)."""
+    cur.execute("SELECT to_regclass('public.auth_passkey_key')")
+    return _fetch_one(cur)[0] is not None
+
+
+def _has_res_users_log(cur: psycopg.Cursor) -> bool:
+    """`res_users_log` exists (Odoo 9+). Last login is the newest row there.
+
+    Odoo 8.0 predates that table and instead stores a real
+    `res_users.login_date` column (written by a direct UPDATE at login), so
+    callers fall back to selecting/grouping that column when this is False."""
+    cur.execute("SELECT to_regclass('public.res_users_log')")
+    return _fetch_one(cur)[0] is not None
+
+
+def compute_mfa(*, totp_set: bool, passkey_count: int, share: bool, totp_policy: str | None) -> str:
+    """Comma-joined set of a user's active MFA methods, or ``"none"``.
+
+    Pure so it can be unit-tested without a cursor (like ``filter_online_users``).
+    Methods, in display order:
+
+    - ``totp``    — ``res_users.totp_secret`` is set, i.e. ``totp_enabled``
+      (`auth_totp`). Odoo's own "enabled" test is ``totp_secret IS NOT NULL``
+      (disabled is ``NULL`` / ``'false'``).
+    - ``passkey`` — the user owns at least one ``auth_passkey_key`` (`auth_passkey`,
+      Odoo 18+). A passkey is a webauthn *login credential*, not a second factor.
+    - ``mail``    — the enterprise `auth_totp_mail_enforce` email-OTP enforcement
+      applies to this user. This mirrors Odoo's ``_mfa_type()``, which returns
+      ``'totp_mail'`` only when the user has **no TOTP** — so ``mail`` is a
+      fallback **suppressed by ``totp``** (``totp`` short-circuits the chain).
+      It is **not** suppressed by ``passkey``: ``auth_passkey`` never overrides
+      ``_mfa_type``, so a passkey user with no TOTP is still routed through email
+      OTP on a password login — hence ``passkey, mail`` is a real combination.
+      Scope follows the global ``auth_totp.policy`` config parameter:
+      ``all_required`` covers everyone, ``employee_required`` only internal users
+      (``_is_internal()`` = ``has_group('base.group_user')``, the complement of
+      ``res_users.share``); portal/share users aren't enforced under the
+      employee policy.
+    """
+    methods: list[str] = []
+    if totp_set:
+        methods.append("totp")
+    if passkey_count > 0:
+        methods.append("passkey")
+    enforced = totp_policy == "all_required" or (totp_policy == "employee_required" and not share)
+    if enforced and not totp_set:
+        methods.append("mail")
+    return ", ".join(methods) if methods else "none"
+
+
+USER_SORT_COLUMNS = ("login", "name", "state", "last_login", "mfa", "active")
+
+
+def get_users(cur: psycopg.Cursor, *, include_inactive: bool = False) -> list[dict]:
+    """List users with ``login``, ``name``, ``state``, ``last_login`` and
+    ``mfa`` (``active`` added with ``include_inactive``).
+
+    ``last_login`` and ``mfa`` are always included — the `users` command shows
+    them by default. NOTE: this is the shape ``odoo-activity``'s TUI and the MCP
+    ``db_query`` read; the two keys are part of the default contract now.
+    """
     cur.execute("SELECT tablename FROM pg_tables WHERE tablename IN ('mail_presence', 'bus_presence')")
     presence_tables = {row[0] for row in cur.fetchall()}
 
     where_clause = sql.SQL("") if include_inactive else sql.SQL("WHERE ru.active = TRUE")
 
-    # `res.users.login_date` is a *non-stored* related field
-    # (`related='log_ids.create_date'`) on every version 12..19 — there is no
-    # `login_date` column to select. The last login is the newest
-    # `res_users_log` row for the user (`create_uid` is the One2many inverse);
-    # Odoo keeps only the latest row per user on newer versions and lets it
-    # accumulate on older ones, so `MAX(create_date)` is the version-agnostic
-    # "last login". Only joined/selected when requested, so the default query
-    # (and its byte-identical shape) is untouched.
-    if include_last_login:
+    # Last login source. On Odoo 9+ `res.users.login_date` is a *non-stored*
+    # related field (`related='log_ids.create_date'`) with no column — the last
+    # login is the newest `res_users_log` row for the user (`create_uid` is the
+    # One2many inverse; Odoo keeps only the latest row per user on newer
+    # versions and lets it accumulate on older ones, so `MAX(create_date)` is
+    # version-agnostic). Odoo 8.0 has no `res_users_log` table and instead
+    # stores a real `res_users.login_date` column, so fall back to it there.
+    if _has_res_users_log(cur):
         last_login_col = sql.SQL("ull.last_login")
         last_login_join = sql.SQL("""
             LEFT JOIN (
@@ -608,62 +683,116 @@ def get_users(cur: psycopg.Cursor, *, include_inactive: bool = False, include_la
             ) ull ON ull.uid = ru.id
         """)
     else:
-        last_login_col = sql.SQL("NULL")
+        last_login_col = sql.SQL("ru.login_date")
         last_login_join = sql.SQL("")
+
+    # MFA columns (totp_set, passkey_count, share) are row[5..7]; `compute_mfa`
+    # turns them + the global `auth_totp.policy` into the `mfa` string. Each
+    # source is probed so a database without `auth_totp`/`auth_passkey` degrades
+    # to FALSE/0 rather than erroring on a missing column/table.
+    totp_expr = (
+        sql.SQL("(ru.totp_secret IS NOT NULL AND ru.totp_secret NOT IN ('', 'false'))")
+        if _has_totp_secret(cur)
+        else sql.SQL("FALSE")
+    )
+    if _has_passkey(cur):
+        passkey_expr = sql.SQL("COALESCE(pk.n, 0)")
+        mfa_join = sql.SQL("""
+            LEFT JOIN (
+                SELECT create_uid AS uid, count(*) AS n
+                FROM auth_passkey_key GROUP BY create_uid
+            ) pk ON pk.uid = ru.id
+        """)
+    else:
+        passkey_expr = sql.SQL("0")
+        mfa_join = sql.SQL("")
+    mfa_cols = sql.SQL(", {totp}, {passkey}, ru.share").format(totp=totp_expr, passkey=passkey_expr)
+    cur.execute("SELECT value FROM ir_config_parameter WHERE key = 'auth_totp.policy'")
+    policy_row = cur.fetchone()
+    totp_policy = policy_row[0] if policy_row else None
 
     if "mail_presence" in presence_tables:
         # Odoo 19+: mail.presence with direct status column
         query = sql.SQL("""
-            SELECT ru.login, rp.name, COALESCE(mp.status, 'offline') AS state, ru.active, {last_login_col}
+            SELECT ru.login, rp.name, COALESCE(mp.status, 'offline') AS state, ru.active, {last_login_col} {mfa_cols}
             FROM res_users ru
             LEFT JOIN res_partner rp ON ru.partner_id = rp.id
             LEFT JOIN mail_presence mp ON mp.user_id = ru.id
             {last_login_join}
+            {mfa_join}
             {where}
             ORDER BY ru.login
         """)
     elif "bus_presence" in presence_tables:
         # Odoo 14-18: bus.presence.status is updated in real-time (HTTP and WebSocket)
         query = sql.SQL("""
-            SELECT ru.login, rp.name, COALESCE(bp.status, 'offline') AS state, ru.active, {last_login_col}
+            SELECT ru.login, rp.name, COALESCE(bp.status, 'offline') AS state, ru.active, {last_login_col} {mfa_cols}
             FROM res_users ru
             LEFT JOIN res_partner rp ON ru.partner_id = rp.id
             LEFT JOIN bus_presence bp ON bp.user_id = ru.id
             {last_login_join}
+            {mfa_join}
             {where}
             ORDER BY ru.login
         """)
     else:
         query = sql.SQL("""
-            SELECT ru.login, rp.name, 'unknown' AS state, ru.active, {last_login_col}
+            SELECT ru.login, rp.name, 'unknown' AS state, ru.active, {last_login_col} {mfa_cols}
             FROM res_users ru
             LEFT JOIN res_partner rp ON ru.partner_id = rp.id
             {last_login_join}
+            {mfa_join}
             {where}
             ORDER BY ru.login
         """)
-    cur.execute(query.format(where=where_clause, last_login_col=last_login_col, last_login_join=last_login_join))
+    cur.execute(
+        query.format(
+            where=where_clause,
+            last_login_col=last_login_col,
+            last_login_join=last_login_join,
+            mfa_cols=mfa_cols,
+            mfa_join=mfa_join,
+        )
+    )
     return [
         {
             "login": row[0],
             "name": row[1] or "",
             "state": row[2],
             # Newest res_users_log.create_date for the user, or None if the
-            # account never logged in. Gated like `active`: the default shape
-            # stays byte-identical for odoo-activity's TUI and the MCP db_query.
-            **({"last_login": row[4].isoformat() if row[4] else None} if include_last_login else {}),
+            # account never logged in.
+            "last_login": row[4].isoformat() if row[4] else None,
+            "mfa": compute_mfa(totp_set=row[5], passkey_count=row[6], share=row[7], totp_policy=totp_policy),
             **({"active": bool(row[3])} if include_inactive else {}),
         }
         for row in cur.fetchall()
     ]
 
 
+def sort_users(rows: list[dict], column: str) -> list[dict]:
+    """Sort user rows (the ``get_users`` shape) by ``column``.
+
+    ``last_login`` sorts most-recent first with never-logged-in last (see
+    ``sort_users_by_last_login``); every other column sorts ascending,
+    case-insensitive, with empty/missing values last. Pure — unit-tested
+    without a cursor, like ``filter_online_users``.
+    """
+    if column == "last_login":
+        return sort_users_by_last_login(rows)
+
+    def key(r: dict):
+        value = r.get(column)
+        text = "" if value is None else str(value)
+        return (text == "", text.casefold())
+
+    return sorted(rows, key=key)
+
+
 def sort_users_by_last_login(rows: list[dict]) -> list[dict]:
     """Sort users by ``last_login`` most-recent first, never-logged-in last.
 
     Pure over the ``get_users`` row shape (``last_login`` is an ISO string or
-    ``None``); ISO timestamps sort chronologically as plain strings. Applied
-    in ``main.py`` after the fetch, like ``filter_online_users`` — the
+    ``None``); ISO timestamps sort chronologically as plain strings. The
     prometheus branch keeps its own ordering-agnostic counting.
     """
     dated = [r for r in rows if r["last_login"]]
@@ -675,6 +804,48 @@ def sort_users_by_last_login(rows: list[dict]) -> list[dict]:
 def filter_online_users(rows: list[dict]) -> list[dict]:
     """Keep only rows whose presence state is ``online``"""
     return [r for r in rows if r["state"] == "online"]
+
+
+_MFA_TYPE_ORDER = ("totp", "passkey", "mail", "none")
+
+
+def summarize_users(rows: list[dict], by: str = "month") -> dict:
+    """Aggregate ``get_users`` rows into counters for ``users --summarize``.
+
+    ``by`` is ``"month"`` (default) or ``"year"`` and selects the last-login
+    bucketing; the result key is named explicitly for it
+    (``last_login_by_month`` with ``YYYY-MM`` keys, or ``last_login_by_year``
+    with ``YYYY``) so a consumer can tell which bucketing it got. A ``never``
+    bucket holds accounts that never logged in. ``mfa_by_type`` is unaffected
+    by ``by``: it counts each enabled factor **independently** — a user with
+    ``"totp, passkey"`` counts in both — while ``none`` counts users with no
+    MFA, so the mfa counts can exceed the user total. Buckets sort ascending
+    with ``never`` last; mfa types follow the display order (``totp``,
+    ``passkey``, ``mail``, ``none``). Pure — unit-tested without a cursor, like
+    ``filter_online_users``.
+    """
+    width = 4 if by == "year" else 7  # "YYYY" vs "YYYY-MM"
+    buckets: dict[str, int] = {}
+    mfa_counts: dict[str, int] = {}
+    for r in rows:
+        last_login = r.get("last_login")
+        bucket = last_login[:width] if last_login else "never"
+        buckets[bucket] = buckets.get(bucket, 0) + 1
+        for token in (r.get("mfa") or "none").split(", "):
+            mfa_counts[token] = mfa_counts.get(token, 0) + 1
+
+    ordered = sorted(b for b in buckets if b != "never")
+    last_login = {b: buckets[b] for b in ordered}
+    if "never" in buckets:
+        last_login["never"] = buckets["never"]
+
+    mfa_by_type = {t: mfa_counts[t] for t in _MFA_TYPE_ORDER if t in mfa_counts}
+    # Any unexpected token (custom _mfa_type) keeps a stable, visible slot.
+    for t in mfa_counts:
+        if t not in mfa_by_type:
+            mfa_by_type[t] = mfa_counts[t]
+
+    return {f"last_login_by_{by}": last_login, "mfa_by_type": mfa_by_type}
 
 
 def get_users_by_year(cur: psycopg.Cursor) -> dict[int, int]:
@@ -703,33 +874,46 @@ def get_users_last_login(cur: psycopg.Cursor) -> dict:
     strings) so the two always agree. Aggregate only — no PII (no
     login/name/email) — the same NDA-free contract as ``get_users_by_year``.
 
-    Last login is ``MAX(res_users_log.create_date)`` per user: ``login_date``
-    is a non-stored related field (no column) on every version 12..19, so the
-    newest ``res.users.log`` row is the source of truth — see ``get_users``.
+    Last login is ``MAX(res_users_log.create_date)`` per user on Odoo 9+
+    (``login_date`` is a non-stored related field with no column — see
+    ``get_users``); on Odoo 8.0, which has no ``res_users_log`` table, it falls
+    back to the real ``res_users.login_date`` column.
     """
-    cur.execute("""
-        WITH last AS (
-            SELECT create_uid AS uid, MAX(create_date) AS last_login
-            FROM res_users_log GROUP BY create_uid
-        )
-        SELECT to_char(last.last_login, 'YYYY-MM') AS ym, count(*)
-        FROM res_users ru
-        JOIN last ON last.uid = ru.id
-        WHERE ru.active = true
-        GROUP BY ym
-        ORDER BY ym
-    """)
-    by_month = {row[0]: row[1] for row in cur.fetchall()}
+    if _has_res_users_log(cur):
+        cur.execute("""
+            WITH last AS (
+                SELECT create_uid AS uid, MAX(create_date) AS last_login
+                FROM res_users_log GROUP BY create_uid
+            )
+            SELECT to_char(last.last_login, 'YYYY-MM') AS ym, count(*)
+            FROM res_users ru
+            JOIN last ON last.uid = ru.id
+            WHERE ru.active = true
+            GROUP BY ym
+            ORDER BY ym
+        """)
+        by_month = {row[0]: row[1] for row in cur.fetchall()}
+        cur.execute("""
+            SELECT count(*) FROM res_users ru
+            WHERE ru.active = true
+              AND NOT EXISTS (SELECT 1 FROM res_users_log l WHERE l.create_uid = ru.id)
+        """)
+    else:
+        # Odoo 8.0: res.users.login_date is a real column.
+        cur.execute("""
+            SELECT to_char(login_date, 'YYYY-MM') AS ym, count(*)
+            FROM res_users
+            WHERE active = true AND login_date IS NOT NULL
+            GROUP BY ym
+            ORDER BY ym
+        """)
+        by_month = {row[0]: row[1] for row in cur.fetchall()}
+        cur.execute("SELECT count(*) FROM res_users WHERE active = true AND login_date IS NULL")
+    never = _fetch_one(cur)[0]
     by_year: dict[int, int] = {}
     for ym, count in by_month.items():
         year = int(ym[:4])
         by_year[year] = by_year.get(year, 0) + count
-    cur.execute("""
-        SELECT count(*) FROM res_users ru
-        WHERE ru.active = true
-          AND NOT EXISTS (SELECT 1 FROM res_users_log l WHERE l.create_uid = ru.id)
-    """)
-    never = _fetch_one(cur)[0]
     return {"by_year": by_year, "by_month": by_month, "never": never}
 
 
