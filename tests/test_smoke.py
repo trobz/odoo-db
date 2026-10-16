@@ -1,5 +1,6 @@
 import string
 from contextlib import nullcontext
+from datetime import datetime
 
 import psycopg
 from typer.testing import CliRunner
@@ -21,6 +22,7 @@ from odoo_db.db import (
     _mime_family,
     _relevant_mail_config_parameters,
     _validate_attachment_orphans,
+    compute_mfa,
     compute_role_drift,
     filter_credential_mail_servers,
     filter_online_users,
@@ -35,6 +37,7 @@ from odoo_db.db import (
     get_mail_servers,
     get_modules,
     get_users,
+    get_users_last_login,
     get_wkhtmltopdf_config_parameters,
     get_wkhtmltopdf_paperformat_params,
     get_wkhtmltopdf_relevant_modules,
@@ -45,7 +48,10 @@ from odoo_db.db import (
     neutralization_state,
     parse_database_flags,
     parse_source_dump_datetime,
+    sort_users,
+    sort_users_by_last_login,
     source_dump_epoch,
+    summarize_users,
 )
 from odoo_db.main import app
 
@@ -1030,11 +1036,27 @@ class _FakeSeqCursor:
     def fetchall(self):
         return self._current
 
+    def fetchone(self):
+        return self._current[0] if self._current else None
+
 
 # (name, latest_version, auto_install, state)
 _MODULE_ROWS = [("base", "19.0.1.0", False, "installed"), ("sale", "19.0.1.0", False, "uninstalled")]
-# (login, name, state, active)
-_USER_ROWS = [("admin", "Mitchell Admin", "offline", True), ("old", "Ex Employee", "offline", False)]
+# (login, name, state, active, last_login, totp_set, passkey_count, share)
+_USER_ROWS = [
+    ("admin", "Mitchell Admin", "offline", True, datetime(2024, 5, 1, 9, 30), True, 0, False),
+    ("old", "Ex Employee", "offline", False, None, False, 0, True),
+]
+
+
+def _user_probe_sets(*, has_totp=True, has_passkey=False, policy=None):
+    """The three MFA probe result sets get_users runs before the main query:
+    _has_totp_secret, _has_passkey, then the auth_totp.policy read."""
+    return (
+        [(1,)] if has_totp else [],
+        [("public.auth_passkey_key",)] if has_passkey else [(None,)],
+        [(policy,)] if policy else [],
+    )
 
 
 def test_get_modules_default_shape_unchanged():
@@ -1054,20 +1076,47 @@ def test_get_modules_include_uninstalled_adds_state_and_installed():
     assert result[1]["installed"] is False
 
 
-def test_get_users_default_shape_unchanged():
-    cur = _FakeSeqCursor([("mail_presence",)], _USER_ROWS[:1])
+def test_get_users_default_shape():
+    # last_login and mfa are part of the default shape now.
+    cur = _FakeSeqCursor([("mail_presence",)], *_user_probe_sets(), _USER_ROWS[:1])
     assert get_users(cur) == [  # ty: ignore[invalid-argument-type]
-        {"login": "admin", "name": "Mitchell Admin", "state": "offline"}
+        {
+            "login": "admin",
+            "name": "Mitchell Admin",
+            "state": "offline",
+            "last_login": "2024-05-01T09:30:00",
+            "mfa": "totp",
+        }
     ]
 
 
 def test_get_users_include_inactive_adds_active():
-    cur = _FakeSeqCursor([("bus_presence",)], _USER_ROWS)
+    cur = _FakeSeqCursor([("bus_presence",)], *_user_probe_sets(), _USER_ROWS)
     result = get_users(cur, include_inactive=True)  # ty: ignore[invalid-argument-type]
 
     assert [r["login"] for r in result] == ["admin", "old"]
     assert result[0]["active"] is True
     assert result[1]["active"] is False
+    # default columns present regardless of --all
+    assert result[0]["last_login"] == "2024-05-01T09:30:00"
+    assert result[1]["last_login"] is None
+    assert result[0]["mfa"] == "totp"
+    assert result[1]["mfa"] == "none"
+
+
+def test_get_users_mfa_from_policy_and_passkey():
+    rows = [
+        ("internal", "I", "offline", True, None, False, 1, False),  # passkey, internal
+        ("portal", "P", "offline", True, None, False, 0, True),  # share, nothing
+    ]
+    cur = _FakeSeqCursor(
+        [("mail_presence",)],
+        *_user_probe_sets(has_passkey=True, policy="employee_required"),
+        rows,
+    )
+    result = {r["login"]: r["mfa"] for r in get_users(cur)}  # ty: ignore[invalid-argument-type]
+    assert result["internal"] == "passkey, mail"  # internal + passkey + employee_required
+    assert result["portal"] == "none"  # share user not enforced under employee_required
 
 
 def test_filter_online_users():
@@ -1079,6 +1128,79 @@ def test_filter_online_users():
         {"login": "no_presence", "state": "unknown"},
     ]
     assert filter_online_users(rows) == [{"login": "on", "state": "online"}]
+
+
+def test_get_users_last_login_derives_year_from_month():
+    # First execute() -> monthly buckets; second -> never-logged-in count.
+    cur = _FakeSeqCursor(
+        [("2023-11", 1), ("2024-01", 3), ("2024-05", 2)],
+        [(4,)],
+    )
+    result = get_users_last_login(cur)  # ty: ignore[invalid-argument-type]
+    assert result["by_month"] == {"2023-11": 1, "2024-01": 3, "2024-05": 2}
+    # by_year is the per-year sum of the monthly buckets.
+    assert result["by_year"] == {2023: 1, 2024: 5}
+    assert result["never"] == 4
+
+
+def test_compute_mfa():
+    assert compute_mfa(totp_set=False, passkey_count=0, share=False, totp_policy=None) == "none"
+    assert compute_mfa(totp_set=True, passkey_count=0, share=False, totp_policy=None) == "totp"
+    assert compute_mfa(totp_set=False, passkey_count=2, share=False, totp_policy=None) == "passkey"
+    # Combined, in display order.
+    assert compute_mfa(totp_set=True, passkey_count=1, share=False, totp_policy=None) == "totp, passkey"
+    # all_required enforces mail on everyone (internal or share) who has no totp.
+    assert compute_mfa(totp_set=False, passkey_count=0, share=False, totp_policy="all_required") == "mail"
+    assert compute_mfa(totp_set=False, passkey_count=0, share=True, totp_policy="all_required") == "mail"
+    # employee_required only on internal users (share=false).
+    assert compute_mfa(totp_set=False, passkey_count=0, share=False, totp_policy="employee_required") == "mail"
+    assert compute_mfa(totp_set=False, passkey_count=0, share=True, totp_policy="employee_required") == "none"
+    # Unknown/optional policy values don't enable mail.
+    assert compute_mfa(totp_set=False, passkey_count=0, share=False, totp_policy="optional") == "none"
+    # totp short-circuits the mail fallback (Odoo's _mfa_type returns totp, never totp_mail).
+    assert compute_mfa(totp_set=True, passkey_count=0, share=False, totp_policy="all_required") == "totp"
+    # passkey does NOT suppress the mail fallback (auth_passkey never overrides _mfa_type).
+    assert compute_mfa(totp_set=False, passkey_count=1, share=False, totp_policy="all_required") == "passkey, mail"
+    # Everything a totp user can show (mail suppressed by totp).
+    assert compute_mfa(totp_set=True, passkey_count=1, share=False, totp_policy="all_required") == "totp, passkey"
+
+
+def test_sort_users_by_last_login():
+    rows = [
+        {"login": "never", "last_login": None},
+        {"login": "older", "last_login": "2023-01-01T00:00:00"},
+        {"login": "newer", "last_login": "2024-06-01T12:00:00"},
+    ]
+    # Most recent first, never-logged-in last.
+    assert [r["login"] for r in sort_users_by_last_login(rows)] == ["newer", "older", "never"]
+
+
+def test_sort_users():
+    rows = [
+        {"login": "carol", "mfa": "totp", "last_login": None},
+        {"login": "alice", "mfa": "none", "last_login": "2024-01-01T00:00:00"},
+        {"login": "bob", "mfa": "passkey, mail", "last_login": "2025-01-01T00:00:00"},
+    ]
+    # Generic columns: ascending, case-insensitive.
+    assert [r["login"] for r in sort_users(rows, "login")] == ["alice", "bob", "carol"]
+    assert [r["login"] for r in sort_users(rows, "mfa")] == ["alice", "bob", "carol"]  # none < passkey,mail < totp
+    # last_login delegates to sort_users_by_last_login (most recent first, None last).
+    assert [r["login"] for r in sort_users(rows, "last_login")] == ["bob", "alice", "carol"]
+
+
+def test_summarize_users():
+    rows = [
+        {"last_login": "2026-03-02T10:00:00", "mfa": "totp"},
+        {"last_login": "2026-03-15T10:00:00", "mfa": "passkey, mail"},
+        {"last_login": "2026-02-01T10:00:00", "mfa": "none"},
+        {"last_login": None, "mfa": "none"},
+    ]
+    s = summarize_users(rows)
+    assert s["last_login_by_month"] == {"2026-02": 1, "2026-03": 2, "never": 1}
+    assert s["mfa_by_type"] == {"totp": 1, "passkey": 1, "mail": 1, "none": 2}
+    # Months ascending with never last; mfa in display order.
+    assert list(s["last_login_by_month"]) == ["2026-02", "2026-03", "never"]
+    assert list(s["mfa_by_type"]) == ["totp", "passkey", "mail", "none"]
 
 
 def test_has_cron_failure_data():

@@ -7,6 +7,7 @@ import os
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from enum import Enum
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
@@ -692,6 +693,17 @@ def jobs(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 # ---------------------------------------------------------------------------
 
 
+class UserSortColumn(str, Enum):
+    """Sortable columns for `users --sort` (mirrors `db.USER_SORT_COLUMNS`)."""
+
+    login = "login"
+    name = "name"
+    state = "state"
+    last_login = "last_login"
+    mfa = "mfa"
+    active = "active"
+
+
 @app.command()
 def users(
     db_name: Annotated[str, typer.Argument(metavar="DB")],
@@ -703,16 +715,59 @@ def users(
         bool,
         typer.Option("--online", help="Only show users currently online."),
     ] = False,
+    sort: Annotated[
+        UserSortColumn,
+        typer.Option(
+            "--sort",
+            help="Column to sort by (default login). last_login sorts most-recent first, never-logged-in last.",
+        ),
+    ] = UserSortColumn.login,
+    summarize: Annotated[
+        bool,
+        typer.Option(
+            "--summarize",
+            help="Show aggregate counters (last_login by month/never and mfa by type) instead of per-user rows.",
+        ),
+    ] = False,
 ):
-    """List users for a database."""
+    """List users for a database.
+
+    Columns: login, name, state, last_login, mfa (and active with --all).
+    With --summarize, prints aggregate counters instead of per-user rows.
+    """
     with _handle_errors(db_name), db.cursor(db_name) as cur:
         rows_data = db.get_users(cur, include_inactive=include_inactive)
 
     # The gauges below count the full set, so --online only narrows the listing.
     display_rows = db.filter_online_users(rows_data) if online else rows_data
+    display_rows = db.sort_users(display_rows, sort.value)
 
     with _writer() as w:
-        if w.fmt == "json":
+        if summarize:
+            # Summarize the selected set (honors --all / --online); --sort is moot.
+            summary = db.summarize_users(display_rows)
+            if w.fmt == "json":
+                w.json(summary)
+            elif w.fmt == "prometheus":
+                lines = [
+                    "# HELP odoo_db_users_mfa Users by MFA factor (each enabled factor counted; none = no MFA)",
+                    "# TYPE odoo_db_users_mfa gauge",
+                    *(f'odoo_db_users_mfa{{db="{db_name}",type="{t}"}} {n}' for t, n in summary["mfa_by_type"].items()),
+                    "# HELP odoo_db_users_last_login Users by last-login month (never = never logged in)",
+                    "# TYPE odoo_db_users_last_login gauge",
+                    *(
+                        f'odoo_db_users_last_login{{db="{db_name}",month="{m}"}} {n}'
+                        for m, n in summary["last_login_by_month"].items()
+                    ),
+                ]
+                w.prometheus(lines)
+            else:
+                w.text("last_login by month:")
+                w.table(["month", "count"], [[m, str(n)] for m, n in summary["last_login_by_month"].items()])
+                w.text("")
+                w.text("mfa by type:")
+                w.table(["mfa", "count"], [[t, str(n)] for t, n in summary["mfa_by_type"].items()])
+        elif w.fmt == "json":
             w.json(display_rows)
         elif w.fmt == "prometheus":
             # Both gauges count active users only, with or without --all.
@@ -727,16 +782,19 @@ def users(
                 f'odoo_db_users_connected{{db="{db_name}"}} {connected}',
             ]
             w.prometheus(lines)
-        elif include_inactive:
-            w.table(
-                ["login", "name", "state", "active"],
-                [[r["login"], r["name"], r["state"], str(r["active"])] for r in display_rows],
-            )
         else:
-            w.table(
-                ["login", "name", "state"],
-                [[r["login"], r["name"], r["state"]] for r in display_rows],
-            )
+            headers = ["login", "name", "state"]
+            if include_inactive:
+                headers.append("active")
+            headers += ["last_login", "mfa"]
+            rows = []
+            for r in display_rows:
+                row = [r["login"], r["name"], r["state"]]
+                if include_inactive:
+                    row.append(str(r["active"]))
+                row += [r["last_login"] or "never", r["mfa"]]
+                rows.append(row)
+            w.table(headers, rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1707,6 +1765,7 @@ def cmd_prepare_audit(
             stats_data = db.get_stats(cur, years=years, top=top, model_owners=model_owners)
             not_odoo_data = db.get_not_odoo(cur)
             users_by_year = db.get_users_by_year(cur)
+            users_last_login = db.get_users_last_login(cur)
             studio_data = db.get_studio_customizations(cur)
             orphan_fields = db.get_orphan_fields(cur)
             customized_records = db.get_customized_system_records(cur, exclude_logins=exclude_logins)
@@ -1729,6 +1788,7 @@ def cmd_prepare_audit(
         "model_owners": model_owners,
         "orphan_tables": orphan_tables,
         "users_by_year": users_by_year,
+        "users_last_login": users_last_login,
         "stats": _compact_stats(stats_data),
         "not_odoo": not_odoo_data,
         "studio_customizations": studio_data,
@@ -1752,6 +1812,7 @@ def cmd_prepare_audit(
         f"(modules={len(modules_data)}, owners={len(model_owners)}, "
         f"tables={len(stats_data['tables'])}, orphans={len(orphan_tables)}, "
         f"user_years={len(users_by_year)}, "
+        f"never_logged_in={users_last_login['never']}, "
         f"views={len(not_odoo_data['views'])}, triggers={len(not_odoo_data['triggers'])}, "
         f"functions={len(not_odoo_data['functions'])}, procedures={len(not_odoo_data['procedures'])}, "
         f"studio_models={studio_data['custom_model_count']}, "

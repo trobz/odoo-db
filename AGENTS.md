@@ -145,6 +145,16 @@ dump won't tell you):
   (authoritative, not heuristic). `orphan_tables` carries a `reason`:
   `uninstalled_module` or `no_ownership_data`. `users_by_year` is
   `{year: count}` — zero PII so the file can ship without an NDA.
+  `users_last_login` is the activity counterpart —
+  `{"by_year": {year: count}, "by_month": {"YYYY-MM": count}, "never": count}`,
+  active users bucketed by their last login with a `never` bucket for accounts
+  that never logged in. Last login is `MAX(res_users_log.create_date)` per user
+  (`login_date` is a non-stored related field with no column — see
+  `users --sort-last-login` above), `never` = active users with no
+  `res_users_log` row. `by_year` is derived in Python from the monthly buckets
+  (`YYYY-MM` keys sort chronologically as strings) so the two always agree —
+  the same aggregate-only, NDA-free contract (`never` also goes in the echo
+  summary line).
   `studio_customizations` carries custom models (with `mixins` list),
   extended models (with full `fields` detail), and studio-flagged records
   by type (menu records include `full_path`).
@@ -220,12 +230,13 @@ dump won't tell you):
 - `crons`, `modules` and `users` share one `--all` convention: default output
   shows only in-use rows (active crons/users, installed modules) and the flag
   drops the SQL filter *and* adds the status key (`active` for crons/users,
-  `state` + `installed` for modules). The key is added **only** when the flag
-  is set — `odoo-activity`'s TUI and MCP `db_query` read the default shape, so
-  it must stay byte-identical. Prometheus gauges keep counting installed/active
-  rows only, with or without `--all`, so alert thresholds don't move.
-  `prepare-audit` calls `get_modules(cur)` with no kwargs, so its bundle is
-  unaffected.
+  `state` + `installed` for modules). That status key is added **only** when
+  the flag is set — `odoo-activity`'s TUI and MCP `db_query` read the default
+  shape, so the `--all`-gated key must not leak into it. (`users` does carry
+  `last_login`/`mfa` by default — see below — but those are unconditional, not
+  `--all`-gated.) Prometheus gauges keep counting installed/active rows only,
+  with or without `--all`, so alert thresholds don't move. `prepare-audit`
+  calls `get_modules(cur)` with no kwargs, so its bundle is unaffected.
 - `users --online` narrows to `state == 'online'`. `state` comes from
   `mail_presence.status` (Odoo 19+) / `bus_presence.status` (14-18), whose
   selection is `online`/`away`/`offline` — `away` is an idle session so it is
@@ -234,6 +245,74 @@ dump won't tell you):
   unit-tested without a cursor) applied in `main.py` *after* the fetch, so the
   prometheus branch still counts every row and the gauges don't move — same
   rule as `--all`.
+- `users` shows `last_login` and `mfa` **by default** (both always in
+  `get_users`' output, alongside `login`/`name`/`state`; `active` still only
+  with `--all`). This is now the default shape `odoo-activity`'s TUI and MCP
+  `db_query` read — the two keys are part of that contract, so a consumer that
+  pins the exact key set needs a companion update.
+- `last_login` = the user's most recent login as an ISO string, or `None` for
+  an account that never logged in. `res.users.login_date` is a **non-stored**
+  related field (`related='log_ids.create_date'`, no `store=True`) on every
+  version 12..19 — there is **no `login_date` column** (verified against live
+  v12 and v18 DBs: `SELECT login_date FROM res_users` errors). It is instead
+  `MAX(res_users_log.create_date)` grouped by `create_uid` (the One2many
+  inverse) via a `LEFT JOIN` subquery aliased `ull`; Odoo keeps only the newest
+  log row per user on recent versions and lets it accumulate on older ones, so
+  `MAX` is version-agnostic. Text shows `never` for a null `last_login`.
+- `users --sort COLUMN` (default `login`) sorts by any column via
+  `db.sort_users()` (pure, unit-tested without a cursor like
+  `filter_online_users`), run in `main.py` after the fetch and after any
+  `--online` filter, so the prometheus branch still counts every row and the
+  gauges don't move. Allowed columns are `db.USER_SORT_COLUMNS` (a Typer
+  `str`-`Enum` in `main.py` gives the `--help` choice list + validation).
+  `last_login` delegates to `db.sort_users_by_last_login()` — most-recent
+  first, never-logged-in last (ISO strings sort chronologically; it partitions
+  dated rows sorted descending then appends the `None` rows). Every other
+  column sorts ascending, case-insensitive (`casefold`), empty/missing values
+  last.
+- `mfa` is a comma-joined set of a user's active factors (display order
+  `totp`, `passkey`, `mail`) or `none`. `db.compute_mfa()` is a pure function
+  (unit-tested without a cursor like `filter_online_users`) over four per-user
+  inputs the query assembles:
+  - `totp` = `res_users.totp_secret` set (`auth_totp`). The field is a
+    computed `NO_ACCESS` Char, but `_compute_totp_secret`/`_auto_init` read and
+    `ALTER TABLE ... ADD COLUMN` a real column, so it physically exists
+    wherever the module is. Matches Odoo's own `_totp_enable_search`:
+    enabled = `totp_secret IS NOT NULL`, disabled = `NULL`/`'false'`.
+  - `passkey` = ≥1 `auth_passkey_key` row for the user (`create_uid`, the
+    `auth.passkey.key` One2many inverse; Odoo 18+). A passkey is a webauthn
+    *login credential*, not a second factor.
+  - `mail` = the enterprise `auth_totp_mail_enforce` email-OTP enforcement
+    applies. This mirrors Odoo's `_mfa_type()`, a priority chain returning
+    `'totp_mail'` **only when the user has no TOTP** — so `mail` is a fallback
+    **suppressed by `totp`** (a `totp` user shows `totp`, never `totp, mail`).
+    It is **not** suppressed by `passkey` (`auth_passkey` never overrides
+    `_mfa_type`), so `passkey, mail` is a real combination. Scope follows the
+    global `auth_totp.policy` config parameter: `all_required` = everyone,
+    `employee_required` = internal users only (`_is_internal()` =
+    `has_group('base.group_user')`, the complement of `res_users.share`), so a
+    portal/share user isn't enforced under the employee policy.
+
+  Both module-backed sources are probed (`_has_totp_secret` via `pg_attribute`,
+  `_has_passkey` via `to_regclass`) so a database without `auth_totp`/
+  `auth_passkey` degrades to `FALSE`/`0` rather than erroring on a missing
+  column/table. Verified against live databases: chaudron (641 users, all
+  `none`); a no-`auth_totp` v12 DB (no error, all `none`); and every positive
+  combination through a rolled-back transaction that set `totp_secret`,
+  created `auth_passkey_key`, and set each policy — confirming `totp` suppresses
+  `mail`, `passkey` does not (`passkey, mail`), and `employee_required` skips
+  share users.
+- `users --summarize` replaces the per-user listing with aggregate counters via
+  `db.summarize_users()` (pure, unit-tested without a cursor): `last_login` by
+  month (`YYYY-MM` from the ISO prefix, with a `never` bucket; months ascending,
+  `never` last) and `mfa` by type. mfa counts each enabled factor
+  **independently** — a `totp, passkey` user counts in both — while `none`
+  counts users with no MFA, so the mfa counts can exceed the user total. It
+  summarizes the selected set (honors `--all`/`--online`; `--sort` is moot).
+  `json` emits `{"last_login_by_month", "mfa_by_type"}`; `text` prints the two
+  as labelled tables; `prometheus` emits `odoo_db_users_mfa{type=...}` and
+  `odoo_db_users_last_login{month=...}` gauges (distinct months are bounded, so
+  the label cardinality is fine) instead of the default active/connected gauges.
 - `params` prints `ir_config_parameter` key/value pairs; it's a local debug
   tool, not part of `prepare-audit`. Optional `[PATTERN]` arg does a
   case-insensitive substring match on `key` (`ILIKE '%pattern%'`). Values of
