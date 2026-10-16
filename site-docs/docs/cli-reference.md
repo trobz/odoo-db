@@ -226,6 +226,9 @@ $ odoo-db jobs [OPTIONS] DB
 
 List users for a database.
 
+Columns: login, name, state, last_login, mfa (and active with --all).
+With --summarize, prints aggregate counters instead of per-user rows.
+
 **Usage**:
 
 ```console
@@ -240,7 +243,8 @@ $ odoo-db users [OPTIONS] DB
 
 * `--all`: Also include archived users.
 * `--online`: Only show users currently online.
-* `--sort-last-login`: Add a last-login column and sort by it (most recent first, never-logged-in last).
+* `--sort [login|name|state|last_login|mfa|active]`: Column to sort by (default login). last_login sorts most-recent first, never-logged-in last.  \[default: login\]
+* `--summarize`: Show aggregate counters (last_login by month/never and mfa by type) instead of per-user rows.
 * `--help`: Show this message and exit.
 
 ## `odoo-db groups`

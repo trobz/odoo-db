@@ -7,6 +7,7 @@ import os
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from enum import Enum
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
@@ -692,6 +693,17 @@ def jobs(db_name: Annotated[str, typer.Argument(metavar="DB")]):
 # ---------------------------------------------------------------------------
 
 
+class UserSortColumn(str, Enum):
+    """Sortable columns for `users --sort` (mirrors `db.USER_SORT_COLUMNS`)."""
+
+    login = "login"
+    name = "name"
+    state = "state"
+    last_login = "last_login"
+    mfa = "mfa"
+    active = "active"
+
+
 @app.command()
 def users(
     db_name: Annotated[str, typer.Argument(metavar="DB")],
@@ -703,25 +715,59 @@ def users(
         bool,
         typer.Option("--online", help="Only show users currently online."),
     ] = False,
-    sort_last_login: Annotated[
+    sort: Annotated[
+        UserSortColumn,
+        typer.Option(
+            "--sort",
+            help="Column to sort by (default login). last_login sorts most-recent first, never-logged-in last.",
+        ),
+    ] = UserSortColumn.login,
+    summarize: Annotated[
         bool,
         typer.Option(
-            "--sort-last-login",
-            help="Add a last-login column and sort by it (most recent first, never-logged-in last).",
+            "--summarize",
+            help="Show aggregate counters (last_login by month/never and mfa by type) instead of per-user rows.",
         ),
     ] = False,
 ):
-    """List users for a database."""
+    """List users for a database.
+
+    Columns: login, name, state, last_login, mfa (and active with --all).
+    With --summarize, prints aggregate counters instead of per-user rows.
+    """
     with _handle_errors(db_name), db.cursor(db_name) as cur:
-        rows_data = db.get_users(cur, include_inactive=include_inactive, include_last_login=sort_last_login)
+        rows_data = db.get_users(cur, include_inactive=include_inactive)
 
     # The gauges below count the full set, so --online only narrows the listing.
     display_rows = db.filter_online_users(rows_data) if online else rows_data
-    if sort_last_login:
-        display_rows = db.sort_users_by_last_login(display_rows)
+    display_rows = db.sort_users(display_rows, sort.value)
 
     with _writer() as w:
-        if w.fmt == "json":
+        if summarize:
+            # Summarize the selected set (honors --all / --online); --sort is moot.
+            summary = db.summarize_users(display_rows)
+            if w.fmt == "json":
+                w.json(summary)
+            elif w.fmt == "prometheus":
+                lines = [
+                    "# HELP odoo_db_users_mfa Users by MFA factor (each enabled factor counted; none = no MFA)",
+                    "# TYPE odoo_db_users_mfa gauge",
+                    *(f'odoo_db_users_mfa{{db="{db_name}",type="{t}"}} {n}' for t, n in summary["mfa_by_type"].items()),
+                    "# HELP odoo_db_users_last_login Users by last-login month (never = never logged in)",
+                    "# TYPE odoo_db_users_last_login gauge",
+                    *(
+                        f'odoo_db_users_last_login{{db="{db_name}",month="{m}"}} {n}'
+                        for m, n in summary["last_login_by_month"].items()
+                    ),
+                ]
+                w.prometheus(lines)
+            else:
+                w.text("last_login by month:")
+                w.table(["month", "count"], [[m, str(n)] for m, n in summary["last_login_by_month"].items()])
+                w.text("")
+                w.text("mfa by type:")
+                w.table(["mfa", "count"], [[t, str(n)] for t, n in summary["mfa_by_type"].items()])
+        elif w.fmt == "json":
             w.json(display_rows)
         elif w.fmt == "prometheus":
             # Both gauges count active users only, with or without --all.
@@ -740,15 +786,13 @@ def users(
             headers = ["login", "name", "state"]
             if include_inactive:
                 headers.append("active")
-            if sort_last_login:
-                headers.append("last_login")
+            headers += ["last_login", "mfa"]
             rows = []
             for r in display_rows:
                 row = [r["login"], r["name"], r["state"]]
                 if include_inactive:
                     row.append(str(r["active"]))
-                if sort_last_login:
-                    row.append(r["last_login"] or "never")
+                row += [r["last_login"] or "never", r["mfa"]]
                 rows.append(row)
             w.table(headers, rows)
 
