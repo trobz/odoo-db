@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.28.0 (2026-10-19)
+
+### Features
+
+- **users**: Add last-login column and sort flag
+  ([`0765fdd`](https://github.com/trobz/odoo-db/commit/0765fdd9bdf50c7a333f8bfea60180dc292082a4))
+
+- **users**: Last_login + mfa by default, generic --sort, --summarize
+  ([`b529997`](https://github.com/trobz/odoo-db/commit/b529997095ff30000bb0668ea4c82f308c265f10))
+
+
 ## v1.27.0 (2026-10-12)
 
 ### Bug Fixes
