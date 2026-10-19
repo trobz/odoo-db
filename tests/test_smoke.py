@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from datetime import datetime
 
 import psycopg
+import typer
 from typer.testing import CliRunner
 
 from odoo_db import db
@@ -66,6 +67,37 @@ def test_help():
 def test_list_help():
     result = runner.invoke(app, ["list", "--help"])
     assert result.exit_code == 0
+
+
+def test_every_command_help_builds():
+    """Every registered command must build its Typer/click params and render
+    --help without error. Catches option-construction regressions (a bad
+    flag/enum/annotation) for the whole CLI surface, and — run under the CI
+    dependency-resolution matrix — version-skew breakage in how Typer/click
+    build options.
+    """
+    command = typer.main.get_command(app)
+    names = sorted(getattr(command, "commands", {}))
+    assert len(names) > 5, f"expected the full command set, got {names}"
+    for name in names:
+        result = runner.invoke(app, [name, "--help"])
+        assert result.exit_code == 0, f"`{name} --help` failed:\n{result.output}"
+
+
+def test_users_options_parse_without_internal_error():
+    """Parsing the users options must not raise an *internal* Typer/click
+    error. Against a bogus DB the command fails cleanly (connection error is
+    handled -> SystemExit from typer.Exit); an option wiring bug — e.g. the
+    `_param_default_explicit` crash from mixing a raw click.Option into Typer's
+    vendored click — would instead surface as some other exception here. This
+    is the regression guard for that class of bug; under the CI dep matrix it
+    runs against freshly-resolved Typer/click versions.
+    """
+    result = runner.invoke(app, ["users", "__odoo_db_no_such_db__", "--summarize", "--summarize-by", "year"])
+    assert result.exit_code != 0  # bogus DB, so it must fail
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        f"unexpected internal error during option parsing: {result.exception!r}"
+    )
 
 
 def test_modules_help():
