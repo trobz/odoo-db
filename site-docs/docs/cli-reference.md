@@ -161,6 +161,12 @@ common reason mail never leaves an Odoo database — and marks the
 stub relay it inserts (`is_neutralization_stub`) so it isn&#x27;t mistaken
 for a real, working server.
 
+Ends with the mail.mail queue — counts per state and the most common
+failure reasons — since a relay that&#x27;s configured right but refuses
+every send (a mailbox password changed upstream) only shows there.
+Recipient addresses in failure reasons are masked unless
+--include-sensitive-information.
+
 **Usage**:
 
 ```console
