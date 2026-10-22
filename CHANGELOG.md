@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.29.0 (2026-10-22)
+
+### Features
+
+- **mail**: Add mail.mail queue section to the mail audit
+  ([`4b99c04`](https://github.com/trobz/odoo-db/commit/4b99c04db8719f7918b3e5a1460af20986b24465))
+
+
 ## v1.28.0 (2026-10-19)
 
 ### Features
