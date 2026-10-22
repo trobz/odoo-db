@@ -28,3 +28,44 @@ jobs:
 
       - name: Run tests
         run: make test
+
+  # The `tests` job above runs against the locked dependency set (uv sync
+  # --frozen). That never exercises the entry point installed from freshly
+  # resolved dependencies — the `uv tool install` / `pip install` path users
+  # actually deploy — so a dependency that ships a breaking change (e.g. a new
+  # Typer that vendors its own click and drops the standalone `click` dep, or a
+  # click that changes its option-parsing internals) slips through green CI and
+  # only blows up on install. This job installs the package like a user would,
+  # across both the newest and the floor-pinned dependency versions, and runs
+  # the CLI construction/parse guards against it.
+  cli-resolved:
+    name: CLI on ${{ matrix.resolution }} deps
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        resolution: [highest, lowest-direct]
+      fail-fast: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Install the package with ${{ matrix.resolution }} dependency resolution
+        run: |
+          uv venv --python 3.12 /tmp/cli
+          uv pip install --python /tmp/cli/bin/python --resolution ${{ matrix.resolution }} .
+          uv pip install --python /tmp/cli/bin/python pytest
+
+      - name: Show resolved runtime deps
+        run: /tmp/cli/bin/python -c "import importlib.metadata as m; [print(p, m.version(p)) for p in ('typer', 'psycopg', 'rich')]"
+
+      - name: Entry point runs (import + command build)
+        run: /tmp/cli/bin/odoo-db --help
+
+      - name: CLI construction/parse guards under resolved deps
+        run: /tmp/cli/bin/python -m pytest tests/test_smoke.py -q -k "help or users_options_parse"
