@@ -62,10 +62,18 @@ jobs:
           uv pip install --python /tmp/cli/bin/python pytest
 
       - name: Show resolved runtime deps
-        run: /tmp/cli/bin/python -c "import importlib.metadata as m; [print(p, m.version(p)) for p in ('typer', 'psycopg', 'rich')]"
+        run: |
+          /tmp/cli/bin/python - <<'EOF'
+          import importlib.metadata as m
+          for p in ("typer", "click", "rich", "psycopg"):
+              try:
+                  print(p, m.version(p))
+              except m.PackageNotFoundError:
+                  print(p, "absent")
+          EOF
 
       - name: Entry point runs (import + command build)
         run: /tmp/cli/bin/odoo-db --help
 
       - name: CLI construction/parse guards under resolved deps
-        run: /tmp/cli/bin/python -m pytest tests/test_smoke.py -q -k "help or users_options_parse"
+        run: /tmp/cli/bin/pytest tests/test_smoke.py -q --import-mode=importlib -k "help or users_options_parse"
