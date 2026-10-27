@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from datetime import datetime
 
 import psycopg
+import typer
 from typer.testing import CliRunner
 
 from odoo_db import db
@@ -64,9 +65,36 @@ def test_help():
     assert result.exit_code == 0
 
 
-def test_list_help():
-    result = runner.invoke(app, ["list", "--help"])
-    assert result.exit_code == 0
+def test_every_command_help_builds():
+    """Every registered command must build its Typer/click params and render
+    --help without error. Catches option-construction regressions (a bad
+    flag/enum/annotation) for the whole CLI surface, and — run under the CI
+    dependency-resolution matrix — version-skew breakage in how Typer/click
+    build options.
+    """
+    command = typer.main.get_command(app)
+    names = sorted(getattr(command, "commands", {}))
+    assert "users" in names and "list" in names, f"commands not registered: {names}"
+    for name in names:
+        result = runner.invoke(app, [name, "--help"])
+        assert result.exit_code == 0, f"`{name} --help` failed:\n{result.output}"
+
+
+def test_users_options_parse_without_internal_error():
+    """Parsing the users options must not raise an *internal* Typer/click
+    error. Against a bogus DB the command fails cleanly (connection error is
+    handled -> SystemExit from typer.Exit); an option wiring bug — e.g. the
+    `_param_default_explicit` crash from mixing a raw click.Option into Typer's
+    vendored click — would instead surface as some other exception here. This
+    is the regression guard for that class of bug; under the CI dep matrix it
+    runs against freshly-resolved Typer/click versions.
+    """
+    result = runner.invoke(app, ["users", "__odoo_db_no_such_db__", "--summarize", "--summarize-by", "year"])
+    # bogus DB -> handled connection error -> typer.Exit(1). A usage error
+    # exits 2; an internal Typer/click error is an uncaught exception that
+    # CliRunner also reports as exit 1, so check both.
+    assert isinstance(result.exception, SystemExit), f"internal error: {result.exception!r}"
+    assert result.exit_code == 1, result.output
 
 
 def test_modules_help():
@@ -80,21 +108,6 @@ def test_users_help():
     assert result.exit_code == 0
     assert "--all" in result.output
     assert "--online" in result.output
-
-
-def test_groups_help():
-    result = runner.invoke(app, ["groups", "--help"])
-    assert result.exit_code == 0
-
-
-def test_roles_help():
-    result = runner.invoke(app, ["roles", "--help"])
-    assert result.exit_code == 0
-
-
-def test_role_drift_help():
-    result = runner.invoke(app, ["role-drift", "--help"])
-    assert result.exit_code == 0
 
 
 class _ProbeCursor:
@@ -224,16 +237,6 @@ def test_compute_role_drift():
     assert all("user_id" in d for d in sensitive_drift)
 
 
-def test_prepare_audit_help():
-    result = runner.invoke(app, ["prepare-audit", "--help"])
-    assert result.exit_code == 0
-
-
-def test_bloat_help():
-    result = runner.invoke(app, ["bloat", "--help"])
-    assert result.exit_code == 0
-
-
 def test_bloat_estimate_pages():
     # empty / unknown inputs → no estimate
     assert _bloat_estimate_pages(0, 100, 8000) == 0
@@ -243,11 +246,6 @@ def test_bloat_estimate_pages():
     assert _bloat_estimate_pages(1000, 100, 8000) == 13
 
 
-def test_attachments_help():
-    result = runner.invoke(app, ["attachments", "--help"])
-    assert result.exit_code == 0
-
-
 def test_crons_help():
     # TERM=dumb: Rich auto-enables ANSI styling in CI (detects GITHUB_ACTIONS),
     # which splits "--include-code" with escape codes and breaks the substring check.
@@ -255,21 +253,6 @@ def test_crons_help():
     assert result.exit_code == 0
     assert "--include-code" in result.output
     assert "--all" in result.output
-
-
-def test_mail_help():
-    result = runner.invoke(app, ["mail", "--help"])
-    assert result.exit_code == 0
-
-
-def test_dump_help():
-    result = runner.invoke(app, ["dump", "--help"])
-    assert result.exit_code == 0
-
-
-def test_restore_help():
-    result = runner.invoke(app, ["restore", "--help"])
-    assert result.exit_code == 0
 
 
 def test_generate_password_length():

@@ -602,3 +602,21 @@ documents the CLI for the free-audit landing on `migration.trobz.com`.
 - `logs/` — Log output directory (`.gitkeep` tracked, `*.log` gitignored)
 - `prepare-audit` writes `<db>.json` to the current working directory; `/*.json` at the repo root is gitignored so local audit dumps stay untracked when running from the source tree.
 - `tests/` — Test suite (pytest)
+
+## CI
+
+- `test.yaml` has two jobs. `tests` runs the full suite on a Python matrix
+  against the **locked** deps (`uv sync --frozen`). `cli-resolved` installs the
+  package the way users deploy it (`uv pip install .`, fresh resolution) across
+  a `resolution: [highest, lowest-direct]` matrix — newest vs floor-pinned
+  deps — and runs the CLI construction/parse guards
+  (`pytest -k "help or users_options_parse"`) plus `odoo-db --help` against it.
+  This exists because the frozen suite can't catch a dependency shipping a
+  breaking change on the install path: latest Typer (0.27+) vendors its own
+  click and drops the standalone `click` dependency, and click ≥8.2 changed
+  option-parsing internals — both only surface when you install from fresh
+  resolution and actually build/parse the CLI, which is what `cli-resolved`
+  does. The guards are `tests/test_smoke.py::test_every_command_help_builds`
+  (every command's params build + `--help`) and
+  `::test_users_options_parse_without_internal_error` (option parsing raises no
+  internal Typer/click error — only a handled `typer.Exit`).
