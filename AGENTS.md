@@ -605,7 +605,7 @@ documents the CLI for the free-audit landing on `migration.trobz.com`.
 
 ## CI
 
-- `test.yaml` has two jobs. `tests` runs the full suite on a Python matrix
+- `test.yaml` has three jobs. `tests` runs the full suite on a Python matrix
   against the **locked** deps (`uv sync --frozen`). `cli-resolved` installs the
   package the way users deploy it (`uv pip install .`, fresh resolution) across
   a `resolution: [highest, lowest-direct]` matrix — newest vs floor-pinned
@@ -620,3 +620,17 @@ documents the CLI for the free-audit landing on `migration.trobz.com`.
   (every command's params build + `--help`) and
   `::test_users_options_parse_without_internal_error` (option parsing raises no
   internal Typer/click error — only a handled `typer.Exit`).
+- `version-fixtures` covers the **data-shape** surface the other two don't. It
+  runs a `postgres` service and loads the synthetic per-version fixtures
+  (`tests/fixtures/versions/`) into throwaway databases, then asserts odoo-db's
+  version-shape probes (`_has_res_users_log`, `_has_totp_secret`, `_has_passkey`,
+  `_has_cron_failure_tracking`, `_has_cron_progress`, presence table,
+  `_groups_category_sql`) and the shape-sensitive commands (`users`
+  `--summarize`, `crons`, the `prepare-audit` probes) agree with each version's
+  `manifest.json` entry. Single job, not a per-version matrix, because the
+  fixtures are tiny in-process SQL loads; it becomes a matrix only if real
+  neutralized dumps replace the synthetic SQL. `tests/test_fixtures.py` is
+  parametrized over the manifest (the oracle — no second hardcoded copy) and
+  `tests/conftest.py` skips the suite when no PostgreSQL is reachable, so
+  `make test` stays green without a database. See
+  `tests/fixtures/versions/README.md`.

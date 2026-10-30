@@ -77,3 +77,45 @@ jobs:
 
       - name: CLI construction/parse guards under resolved deps
         run: /tmp/cli/bin/pytest tests/test_smoke.py -q --import-mode=importlib -k "help or users_options_parse"
+
+  # `cli-resolved` covers the dependency/install surface; this covers the
+  # data-shape surface. It loads the synthetic per-version fixtures
+  # (tests/fixtures/versions/) into a throwaway PostgreSQL and asserts odoo-db's
+  # version-shape probes and the shape-sensitive commands agree with each
+  # version's manifest entry. The fixtures are tiny in-process SQL loads, so
+  # this is a single job rather than a per-version matrix (a matrix would spin
+  # up seven postgres services to each run one seventh of the suite); if real
+  # neutralized dumps replace the synthetic SQL later, this becomes the matrix
+  # the spec describes. See tests/fixtures/versions/README.md.
+  version-fixtures:
+    name: Version fixtures
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up the environment
+        uses: ./.github/actions/setup-python-env
+        with:
+          python-version: "3.12"
+
+      - name: Run version-fixture shape tests
+        run: uv run python -m pytest tests/test_fixtures.py -q
