@@ -164,6 +164,18 @@ odoo-db restore /tmp/my_db.pgdump --db my_db_copy --force --reset-passwords
 make install   # Install deps + pre-commit hooks
 make check     # Lint, format, type-check
 make test      # Run tests
+make test-fixtures  # Run the per-version DB shape tests (needs a reachable PostgreSQL)
 make docs      # Build the Zensical documentation site (site-docs/)
 make docs-serve  # Serve the docs locally
 ```
+
+### Per-version fixtures
+
+`tests/fixtures/versions/` holds tiny synthetic per-version databases that pin
+odoo-db's version-shape assumptions (`res_users_log` vs a `login_date` column,
+`totp_secret`, `auth_passkey_key`, the 18.0 cron columns, `bus_presence` →
+`mail_presence`, `res_groups.category_id` → `privilege_id`). The
+`version-fixtures` CI job loads each into a throwaway PostgreSQL and asserts the
+probes and shape-sensitive commands agree with the manifest. `make test` skips
+these when no database is reachable. See
+[`tests/fixtures/versions/README.md`](tests/fixtures/versions/README.md).

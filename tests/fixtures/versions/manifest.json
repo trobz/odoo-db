@@ -1,0 +1,162 @@
+[
+  {
+    "version": "8.0",
+    "kind": "sql",
+    "fixture": "8.0.sql",
+    "modules": ["base", "web", "sale"],
+    "expected_shape": {
+      "last_login_source": "column",
+      "has_res_users_log": false,
+      "has_totp_secret": false,
+      "has_passkey_table": false,
+      "has_cron_failure_cols": false,
+      "has_cron_progress": false,
+      "presence_table": null,
+      "groups_category_source": "category_id"
+    }
+  },
+  {
+    "version": "9.0",
+    "kind": "sql",
+    "fixture": "9.0.sql",
+    "modules": ["base", "web", "bus", "mail", "sale"],
+    "expected_shape": {
+      "last_login_source": "res_users_log",
+      "has_res_users_log": true,
+      "has_totp_secret": false,
+      "has_passkey_table": false,
+      "has_cron_failure_cols": false,
+      "has_cron_progress": false,
+      "presence_table": "bus_presence",
+      "groups_category_source": "category_id"
+    }
+  },
+  {
+    "version": "12.0",
+    "kind": "sql",
+    "fixture": "12.0.sql",
+    "modules": ["base", "web", "bus", "mail", "sale"],
+    "expected_shape": {
+      "last_login_source": "res_users_log",
+      "has_res_users_log": true,
+      "has_totp_secret": false,
+      "has_passkey_table": false,
+      "has_cron_failure_cols": false,
+      "has_cron_progress": false,
+      "presence_table": "bus_presence",
+      "groups_category_source": "category_id"
+    }
+  },
+  {
+    "version": "13.0",
+    "kind": "sql",
+    "fixture": "13.0.sql",
+    "modules": ["base", "web", "bus", "mail", "sale"],
+    "expected_shape": {
+      "last_login_source": "res_users_log",
+      "has_res_users_log": true,
+      "has_totp_secret": false,
+      "has_passkey_table": false,
+      "has_cron_failure_cols": false,
+      "has_cron_progress": false,
+      "presence_table": "bus_presence",
+      "groups_category_source": "category_id"
+    }
+  },
+  {
+    "version": "14.0",
+    "kind": "sql",
+    "fixture": "14.0.sql",
+    "modules": ["base", "web", "bus", "mail", "sale"],
+    "expected_shape": {
+      "last_login_source": "res_users_log",
+      "has_res_users_log": true,
+      "has_totp_secret": false,
+      "has_passkey_table": false,
+      "has_cron_failure_cols": false,
+      "has_cron_progress": false,
+      "presence_table": "bus_presence",
+      "groups_category_source": "category_id"
+    }
+  },
+  {
+    "version": "16.0",
+    "kind": "sql",
+    "fixture": "16.0.sql",
+    "modules": ["base", "web", "bus", "mail", "auth_totp", "sale"],
+    "expected_shape": {
+      "last_login_source": "res_users_log",
+      "has_res_users_log": true,
+      "has_totp_secret": true,
+      "has_passkey_table": false,
+      "has_cron_failure_cols": false,
+      "has_cron_progress": false,
+      "presence_table": "bus_presence",
+      "groups_category_source": "category_id"
+    }
+  },
+  {
+    "version": "17.0",
+    "kind": "sql",
+    "fixture": "17.0.sql",
+    "modules": ["base", "web", "bus", "mail", "auth_totp", "sale"],
+    "expected_shape": {
+      "last_login_source": "res_users_log",
+      "has_res_users_log": true,
+      "has_totp_secret": true,
+      "has_passkey_table": false,
+      "has_cron_failure_cols": false,
+      "has_cron_progress": false,
+      "presence_table": "bus_presence",
+      "groups_category_source": "category_id"
+    }
+  },
+  {
+    "version": "18.0",
+    "kind": "sql",
+    "fixture": "18.0.sql",
+    "modules": ["base", "web", "bus", "mail", "auth_totp", "auth_passkey", "sale"],
+    "expected_shape": {
+      "last_login_source": "res_users_log",
+      "has_res_users_log": true,
+      "has_totp_secret": true,
+      "has_passkey_table": true,
+      "has_cron_failure_cols": true,
+      "has_cron_progress": true,
+      "presence_table": "bus_presence",
+      "groups_category_source": "category_id"
+    }
+  },
+  {
+    "version": "19.0",
+    "kind": "sql",
+    "fixture": "19.0.sql",
+    "modules": ["base", "web", "mail", "auth_totp", "auth_passkey", "sale"],
+    "expected_shape": {
+      "last_login_source": "res_users_log",
+      "has_res_users_log": true,
+      "has_totp_secret": true,
+      "has_passkey_table": true,
+      "has_cron_failure_cols": true,
+      "has_cron_progress": true,
+      "presence_table": "mail_presence",
+      "groups_category_source": "privilege_id"
+    }
+  },
+  {
+    "version": "20.0",
+    "kind": "sql",
+    "fixture": "20.0.sql",
+    "modules": ["base", "web", "mail", "auth_totp", "auth_passkey", "sale"],
+    "expected_shape": {
+      "last_login_source": "res_users_log",
+      "has_res_users_log": true,
+      "has_totp_secret": true,
+      "has_passkey_table": true,
+      "has_cron_failure_cols": true,
+      "has_cron_progress": true,
+      "presence_table": "mail_presence",
+      "groups_category_source": "privilege_id"
+    }
+  }
+]
