@@ -1,3 +1,4 @@
+import json
 import string
 from contextlib import nullcontext
 from datetime import datetime
@@ -1736,3 +1737,158 @@ def test_get_mail_queue_without_failure_reason_column():
         "states": [{"state": "sent", "count": 3, "oldest": None, "newest": None}],
         "failure_reasons": None,
     }
+
+
+class _FakeFetchallCursor:
+    """Cursor stand-in returning one queued fetchall() result per execute()."""
+
+    def __init__(self, *results):
+        self._results = list(results)
+        self._current: list = []
+        self.queries: list = []
+
+    def execute(self, query, params=None):
+        self.queries.append((query, params))
+        self._current = self._results.pop(0)
+
+    def fetchall(self):
+        return self._current
+
+
+def _customized_records_cursor(login=None):
+    return _FakeFetchallCursor(
+        [("ir.ui.view",)],  # models with module xmlids
+        [("ir_ui_view",)],  # tables having write_uid
+        [("sale", "view_order_form", 7, login, False)],  # per-model scan
+    )
+
+
+def _scan_query(cur) -> str:
+    query, _params = cur.queries[-1]
+    return query.as_string(None) if hasattr(query, "as_string") else query
+
+
+def test_get_customized_system_records_exports_user_id_not_login_by_default():
+    cur = _customized_records_cursor()
+    result = db.get_customized_system_records(cur)
+    assert result == [
+        {
+            "model": "ir.ui.view",
+            "module": "sale",
+            "xml_id": "view_order_form",
+            "modified_by_id": 7,
+            "noupdate": False,
+        }
+    ]
+    # res_users is not even joined when logins are not requested.
+    assert "res_users" not in _scan_query(cur)
+
+
+def test_get_customized_system_records_adds_login_when_sensitive():
+    cur = _customized_records_cursor(login="jane@acme.com")
+    result = db.get_customized_system_records(cur, include_sensitive=True)
+    assert result[0]["modified_by_id"] == 7
+    assert result[0]["modified_by"] == "jane@acme.com"
+    assert "LEFT JOIN res_users" in _scan_query(cur)
+
+
+def test_get_customized_system_records_excludes_by_user_id_not_login():
+    # Filtering on the login would drop rows whose write_uid points to a deleted
+    # user (NULL login -> NULL != ALL(...) -> filtered out).
+    cur = _customized_records_cursor()
+    db.get_customized_system_records(cur, exclude_user_ids=[2, 5])
+    _query, params = cur.queries[-1]
+    assert "t.write_uid != ALL(%(excl)s)" in _scan_query(cur)
+    assert "u.login" not in _scan_query(cur)
+    assert params["excl"] == [2, 5]
+
+
+def test_get_user_ids_by_login():
+    assert db.get_user_ids_by_login(_FakeFetchallCursor(), []) == {}  # ty: ignore[invalid-argument-type]
+    cur = _FakeFetchallCursor([("a@x.com", 3)])
+    assert db.get_user_ids_by_login(cur, ["a@x.com", "typo@x.com"]) == {"a@x.com": 3}  # ty: ignore[invalid-argument-type]
+    assert cur.queries[0][1] == (["a@x.com", "typo@x.com"],)
+
+
+def _run_prepare_audit(monkeypatch, tmp_path, *extra_global_args):
+    """Run `prepare-audit` with every db call stubbed; return (result, payload, captured kwargs)."""
+    from odoo_db import main as main_mod
+
+    captured: dict = {}
+
+    def fake_customized(_cur, exclude_user_ids=None, *, include_sensitive=False):
+        captured["exclude_user_ids"] = exclude_user_ids
+        entry = {"model": "ir.ui.view", "module": "sale", "xml_id": "v", "modified_by_id": 7, "noupdate": False}
+        if include_sensitive:
+            entry["modified_by"] = "jane@acme.com"
+        return [entry]
+
+    stubs = {
+        "get_db_summary": lambda name, verbose=False: db.DbSummary(
+            name, "17.0", flags={}, module_count=1, user_count=1
+        ),
+        "cursor": lambda _name: nullcontext(),
+        "get_modules": lambda _cur: [],
+        "get_module_dependents": lambda _cur: {},
+        "get_model_owners": lambda _cur: {},
+        "get_stats": lambda _cur, **_kw: {"db_size": "1 MB", "years": [], "tables": []},
+        "get_not_odoo": lambda _cur: {"views": [], "triggers": [], "functions": [], "procedures": [], "recognized": {}},
+        "get_users_by_year": lambda _cur: {},
+        "get_users_last_login": lambda _cur: {"by_year": {}, "by_month": {}, "never": 0},
+        "get_studio_customizations": lambda _cur: {"custom_model_count": 0, "extended_model_count": 0},
+        "get_orphan_fields": lambda _cur: [],
+        "get_user_ids_by_login": lambda _cur, logins: {"admin.real@acme.com": 2} if logins else {},
+        "get_customized_system_records": fake_customized,
+        "get_mail_message_stats": lambda _cur: None,
+        "get_attachment_stats": lambda _cur: None,
+        "get_cron_inventory": lambda _cur: None,
+        "get_company_count": lambda _cur: 1,
+        "get_orphan_tables": lambda *_a: [],
+    }
+    for name, fn in stubs.items():
+        monkeypatch.setattr(db, name, fn)
+    # Global options persist in module state across invocations: reset them.
+    monkeypatch.setattr(main_mod, "_include_sensitive", False)
+    out = tmp_path / "audit.json"
+    result = runner.invoke(
+        app,
+        [
+            *extra_global_args,
+            "--output-file",
+            str(out),
+            "prepare-audit",
+            "mydb",
+            "--admin-user",
+            "admin.real@acme.com",
+            "--admin-user",
+            "typo@acme.com",
+        ],
+    )
+    payload = json.loads(out.read_text()) if out.exists() else None
+    return result, payload, captured
+
+
+def test_prepare_audit_payload_has_no_logins_by_default(monkeypatch, tmp_path):
+    result, payload, captured = _run_prepare_audit(monkeypatch, tmp_path)
+    assert result.exit_code == 0, result.output
+    assert captured["exclude_user_ids"] == [2]
+    assert payload["customized_records"][0]["modified_by_id"] == 7
+    assert "modified_by" not in payload["customized_records"][0]
+    assert payload["customized_records_excluded_ids"] == [2]
+    assert "customized_records_excluded" not in payload
+    assert "acme.com" not in json.dumps(payload)
+
+
+def test_prepare_audit_payload_adds_logins_when_sensitive(monkeypatch, tmp_path):
+    result, payload, _captured = _run_prepare_audit(monkeypatch, tmp_path, "--include-sensitive-information")
+    assert result.exit_code == 0, result.output
+    assert payload["customized_records"][0]["modified_by"] == "jane@acme.com"
+    # Only the logins that resolved are listed.
+    assert payload["customized_records_excluded"] == ["admin.real@acme.com"]
+    assert payload["customized_records_excluded_ids"] == [2]
+
+
+def test_prepare_audit_warns_on_unknown_admin_user(monkeypatch, tmp_path):
+    result, _payload, _captured = _run_prepare_audit(monkeypatch, tmp_path)
+    assert "typo@acme.com" in result.output
+    assert "not found" in result.output

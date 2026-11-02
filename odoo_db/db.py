@@ -2459,7 +2459,9 @@ def get_orphan_fields(cur: psycopg.Cursor) -> list[dict]:
     return [{"table": r[0], "column": r[1], "data_type": r[2]} for r in cur.fetchall()]
 
 
-def get_customized_system_records(cur: psycopg.Cursor, exclude_logins: list[str] | None = None) -> list[dict]:
+def get_customized_system_records(
+    cur: psycopg.Cursor, exclude_user_ids: list[int] | None = None, *, include_sensitive: bool = False
+) -> list[dict]:
     """Return all records that have an XML ID from a module but were edited by a real user.
 
     Checks write_uid on the actual record table (not on ir_model_data). A record
@@ -2469,7 +2471,17 @@ def get_customized_system_records(cur: psycopg.Cursor, exclude_logins: list[str]
 
     Covers ALL models in ir_model_data, not just a curated list. Runs one query
     per model — skips tables that don't exist or lack write_uid (m2m relation
-    tables, etc.). Returns per-record detail: module, model, xml_id, modified_by.
+    tables, etc.). Returns per-record detail: module, model, xml_id,
+    modified_by_id (the editor's ``res_users.id``).
+
+    The editor's login (usually an email, so PII) is added as ``modified_by``
+    only when ``include_sensitive=True`` — same gate as ``role-drift``;
+    ``res_users`` is only joined in that case.
+
+    ``exclude_user_ids`` filters on ``write_uid`` directly (resolve logins with
+    ``get_user_ids_by_login``), so a record whose ``write_uid`` points to a
+    deleted user is still reported instead of being dropped by a NULL
+    comparison on its missing login.
     """
     # All distinct models referenced by real modules (must exist in ir_module_module;
     # excludes fake import namespaces like 'import_hr' used during CSV imports)
@@ -2499,7 +2511,9 @@ def get_customized_system_records(cur: psycopg.Cursor, exclude_logins: list[str]
 
     model_table_pairs = [(m, m.replace(".", "_")) for m in candidate_models if m.replace(".", "_") in queryable]
 
-    excluded = list(exclude_logins) if exclude_logins else []
+    excluded = list(exclude_user_ids) if exclude_user_ids else []
+    login_col = sql.SQL("u.login") if include_sensitive else sql.SQL("NULL")
+    users_join = sql.SQL("LEFT JOIN res_users u ON u.id = t.write_uid") if include_sensitive else sql.SQL("")
 
     results: list[dict] = []
     for model, table in track(
@@ -2507,16 +2521,16 @@ def get_customized_system_records(cur: psycopg.Cursor, exclude_logins: list[str]
         description="Scanning customized records…",
         console=_progress_console,
     ):
-        excl_clause = sql.SQL("AND u.login != ALL(%(excl)s)") if excluded else sql.SQL("")
+        excl_clause = sql.SQL("AND t.write_uid != ALL(%(excl)s)") if excluded else sql.SQL("")
         params: dict = {"model": model}
         if excluded:
             params["excl"] = excluded
         cur.execute(
             sql.SQL("""
-            SELECT imd.module, imd.name, u.login, imd.noupdate
+            SELECT imd.module, imd.name, t.write_uid, {login}, imd.noupdate
             FROM ir_model_data imd
             JOIN {tbl} t ON t.id = imd.res_id
-            LEFT JOIN res_users u ON u.id = t.write_uid
+            {users_join}
             WHERE imd.model = %(model)s
               AND imd.module NOT IN ('__export__', '__import__', '__custom__', '__base__')
               AND imd.module NOT LIKE '%%studio%%'
@@ -2525,18 +2539,33 @@ def get_customized_system_records(cur: psycopg.Cursor, exclude_logins: list[str]
               AND t.write_uid != 1
               {excl}
             ORDER BY imd.module, imd.name
-            """).format(tbl=sql.Identifier(table), excl=excl_clause),
+            """).format(tbl=sql.Identifier(table), login=login_col, users_join=users_join, excl=excl_clause),
             params,
         )
         for r in cur.fetchall():
-            results.append({
+            entry = {
                 "model": model,
                 "module": r[0],
                 "xml_id": r[1],
-                "modified_by": r[2],
-                "noupdate": bool(r[3]),
-            })
+                "modified_by_id": r[2],
+                "noupdate": bool(r[4]),
+            }
+            if include_sensitive:
+                entry["modified_by"] = r[3]
+            results.append(entry)
     return results
+
+
+def get_user_ids_by_login(cur: psycopg.Cursor, logins: list[str]) -> dict[str, int]:
+    """Resolve logins to ``{login: res_users.id}``.
+
+    Unknown logins are absent from the result: callers compare against their
+    input to report the ones that did not resolve.
+    """
+    if not logins:
+        return {}
+    cur.execute("SELECT login, id FROM res_users WHERE login = ANY(%s) ORDER BY id", (logins,))
+    return {r[0]: r[1] for r in cur.fetchall()}
 
 
 def get_mail_message_stats(cur: psycopg.Cursor) -> dict[str, int] | None:
