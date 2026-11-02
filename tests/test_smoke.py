@@ -1793,8 +1793,7 @@ def test_get_customized_system_records_adds_login_when_sensitive():
 
 
 def test_get_customized_system_records_excludes_by_user_id_not_login():
-    # Filtering on the login would drop rows whose write_uid points to a deleted
-    # user (NULL login -> NULL != ALL(...) -> filtered out).
+    # Exclusion filters on write_uid, so the default scan never joins res_users.
     cur = _customized_records_cursor()
     db.get_customized_system_records(cur, exclude_user_ids=[2, 5])
     _query, params = cur.queries[-1]
@@ -1805,8 +1804,9 @@ def test_get_customized_system_records_excludes_by_user_id_not_login():
 
 def test_get_user_ids_by_login():
     assert db.get_user_ids_by_login(_FakeFetchallCursor(), []) == {}  # ty: ignore[invalid-argument-type]
-    cur = _FakeFetchallCursor([("a@x.com", 3)])
-    assert db.get_user_ids_by_login(cur, ["a@x.com", "typo@x.com"]) == {"a@x.com": 3}  # ty: ignore[invalid-argument-type]
+    # website's (login, website_id) constraint: one login, internal + portal user
+    cur = _FakeFetchallCursor([("a@x.com", 3), ("a@x.com", 9)])
+    assert db.get_user_ids_by_login(cur, ["a@x.com", "typo@x.com"]) == {"a@x.com": [3, 9]}  # ty: ignore[invalid-argument-type]
     assert cur.queries[0][1] == (["a@x.com", "typo@x.com"],)
 
 
@@ -1837,7 +1837,8 @@ def _run_prepare_audit(monkeypatch, tmp_path, *extra_global_args):
         "get_users_last_login": lambda _cur: {"by_year": {}, "by_month": {}, "never": 0},
         "get_studio_customizations": lambda _cur: {"custom_model_count": 0, "extended_model_count": 0},
         "get_orphan_fields": lambda _cur: [],
-        "get_user_ids_by_login": lambda _cur, logins: {"admin.real@acme.com": 2} if logins else {},
+        # One login, two users (internal + website portal): both must be excluded.
+        "get_user_ids_by_login": lambda _cur, logins: {"admin.real@acme.com": [11, 2]} if logins else {},
         "get_customized_system_records": fake_customized,
         "get_mail_message_stats": lambda _cur: None,
         "get_attachment_stats": lambda _cur: None,
@@ -1871,10 +1872,10 @@ def _run_prepare_audit(monkeypatch, tmp_path, *extra_global_args):
 def test_prepare_audit_payload_has_no_logins_by_default(monkeypatch, tmp_path):
     result, payload, captured = _run_prepare_audit(monkeypatch, tmp_path)
     assert result.exit_code == 0, result.output
-    assert captured["exclude_user_ids"] == [2]
+    assert captured["exclude_user_ids"] == [2, 11]
     assert payload["customized_records"][0]["modified_by_id"] == 7
     assert "modified_by" not in payload["customized_records"][0]
-    assert payload["customized_records_excluded_ids"] == [2]
+    assert payload["customized_records_excluded_ids"] == [2, 11]
     assert "customized_records_excluded" not in payload
     assert "acme.com" not in json.dumps(payload)
 
@@ -1885,7 +1886,7 @@ def test_prepare_audit_payload_adds_logins_when_sensitive(monkeypatch, tmp_path)
     assert payload["customized_records"][0]["modified_by"] == "jane@acme.com"
     # Only the logins that resolved are listed.
     assert payload["customized_records_excluded"] == ["admin.real@acme.com"]
-    assert payload["customized_records_excluded_ids"] == [2]
+    assert payload["customized_records_excluded_ids"] == [2, 11]
 
 
 def test_prepare_audit_warns_on_unknown_admin_user(monkeypatch, tmp_path):

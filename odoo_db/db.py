@@ -2479,9 +2479,8 @@ def get_customized_system_records(
     ``res_users`` is only joined in that case.
 
     ``exclude_user_ids`` filters on ``write_uid`` directly (resolve logins with
-    ``get_user_ids_by_login``), so a record whose ``write_uid`` points to a
-    deleted user is still reported instead of being dropped by a NULL
-    comparison on its missing login.
+    ``get_user_ids_by_login``), so the default scan never needs to join
+    ``res_users``.
     """
     # All distinct models referenced by real modules (must exist in ir_module_module;
     # excludes fake import namespaces like 'import_hr' used during CSV imports)
@@ -2556,16 +2555,22 @@ def get_customized_system_records(
     return results
 
 
-def get_user_ids_by_login(cur: psycopg.Cursor, logins: list[str]) -> dict[str, int]:
-    """Resolve logins to ``{login: res_users.id}``.
+def get_user_ids_by_login(cur: psycopg.Cursor, logins: list[str]) -> dict[str, list[int]]:
+    """Resolve logins to ``{login: [res_users.id, ...]}``.
 
-    Unknown logins are absent from the result: callers compare against their
-    input to report the ones that did not resolve.
+    A login can map to several users: with ``website`` installed the unique
+    constraint is ``(login, website_id)``, so an internal user and a portal user
+    of a "specific user account" website may share one. Unknown logins are
+    absent from the result: callers compare against their input to report the
+    ones that did not resolve.
     """
     if not logins:
         return {}
     cur.execute("SELECT login, id FROM res_users WHERE login = ANY(%s) ORDER BY id", (logins,))
-    return {r[0]: r[1] for r in cur.fetchall()}
+    ids: dict[str, list[int]] = {}
+    for login, user_id in cur.fetchall():
+        ids.setdefault(login, []).append(user_id)
+    return ids
 
 
 def get_mail_message_stats(cur: psycopg.Cursor) -> dict[str, int] | None:

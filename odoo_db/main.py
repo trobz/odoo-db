@@ -1823,8 +1823,9 @@ def cmd_prepare_audit(
                     f"{', '.join(unknown_logins)}",
                     err=True,
                 )
+            excluded_user_ids = sorted(uid for uids in excluded_users.values() for uid in uids)
             customized_records = db.get_customized_system_records(
-                cur, exclude_user_ids=list(excluded_users.values()), include_sensitive=_include_sensitive
+                cur, exclude_user_ids=excluded_user_ids, include_sensitive=_include_sensitive
             )
             mail_message_stats = db.get_mail_message_stats(cur)
             attachment_stats = db.get_attachment_stats(cur)
@@ -1851,7 +1852,7 @@ def cmd_prepare_audit(
         "studio_customizations": studio_data,
         "orphan_fields": orphan_fields,
         "customized_records": customized_records,
-        "customized_records_excluded_ids": sorted(excluded_users.values()),
+        "customized_records_excluded_ids": excluded_user_ids,
         **({"customized_records_excluded": list(excluded_users)} if _include_sensitive else {}),
         "mail_message_stats": mail_message_stats,
         "attachment_stats": attachment_stats,
