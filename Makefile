@@ -33,6 +33,11 @@ test: ## Test the code with pytest
 	@echo "🚀 Testing code: Running pytest"
 	@uv run python -m pytest --doctest-modules
 
+.PHONY: test-fixtures
+test-fixtures: ## Run the per-version DB shape tests (needs a reachable PostgreSQL)
+	@echo "🚀 Testing per-version fixtures: Running pytest tests/test_fixtures.py"
+	@uv run python -m pytest tests/test_fixtures.py -q
+
 
 .PHONY: build
 build: clean-build ## Build wheel file
