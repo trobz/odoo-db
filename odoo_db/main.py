@@ -1795,6 +1795,9 @@ def cmd_prepare_audit(
     Stats payload is compacted: empty tables drop year_counts/index/attachment
     fields; non-empty tables drop zero year entries. Consumers should use
     `.get(key, 0)` for the dropped fields.
+
+    Customized records identify their last editor by user id only; logins
+    (PII) are exported only with --include-sensitive-information.
     """
     with _handle_errors(db_name):
         summary = db.get_db_summary(db_name, verbose=True)
@@ -1812,7 +1815,18 @@ def cmd_prepare_audit(
             users_last_login = db.get_users_last_login(cur)
             studio_data = db.get_studio_customizations(cur)
             orphan_fields = db.get_orphan_fields(cur)
-            customized_records = db.get_customized_system_records(cur, exclude_logins=exclude_logins)
+            excluded_users = db.get_user_ids_by_login(cur, exclude_logins)
+            unknown_logins = [login for login in exclude_logins if login not in excluded_users]
+            if unknown_logins:
+                typer.echo(
+                    f"Warning [{db_name}]: --admin-user login(s) not found, nothing excluded for them: "
+                    f"{', '.join(unknown_logins)}",
+                    err=True,
+                )
+            excluded_user_ids = sorted(uid for uids in excluded_users.values() for uid in uids)
+            customized_records = db.get_customized_system_records(
+                cur, exclude_user_ids=excluded_user_ids, include_sensitive=_include_sensitive
+            )
             mail_message_stats = db.get_mail_message_stats(cur)
             attachment_stats = db.get_attachment_stats(cur)
             cron_inventory = db.get_cron_inventory(cur)
@@ -1838,7 +1852,8 @@ def cmd_prepare_audit(
         "studio_customizations": studio_data,
         "orphan_fields": orphan_fields,
         "customized_records": customized_records,
-        "customized_records_excluded": exclude_logins if exclude_logins else [],
+        "customized_records_excluded_ids": excluded_user_ids,
+        **({"customized_records_excluded": list(excluded_users)} if _include_sensitive else {}),
         "mail_message_stats": mail_message_stats,
         "attachment_stats": attachment_stats,
         "cron_inventory": cron_inventory,

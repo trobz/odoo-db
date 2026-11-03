@@ -482,6 +482,9 @@ Stats payload is compacted: empty tables drop year_counts/index/attachment
 fields; non-empty tables drop zero year entries. Consumers should use
 `.get(key, 0)` for the dropped fields.
 
+Customized records identify their last editor by user id only; logins
+(PII) are exported only with --include-sensitive-information.
+
 **Usage**:
 
 ```console

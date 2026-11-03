@@ -164,8 +164,12 @@ dump won't tell you):
   `customized_records` scan — useful when the primary admin uses a personal
   account instead of the system `admin` user.
   Additional bundle fields: `orphan_fields` (list of `{table, column, reason}`),
-  `customized_records` (list of `{module, name, login}`),
-  `customized_records_excluded` (list of excluded logins, empty if none),
+  `customized_records` (list of `{model, module, xml_id, modified_by_id,
+  noupdate}`; the editor's login is added as `modified_by` only with the
+  global `--include-sensitive-information`, so the bundle carries no login by
+  default), `customized_records_excluded_ids` (user ids of the `--admin-user`
+  logins, empty if none; the logins themselves go in
+  `customized_records_excluded` only with `--include-sensitive-information`),
   `mail_message_stats` (`{message_type: count}` or null if table missing),
   `attachment_stats` (`{storage: {count, total_size}}` or null),
   `cron_inventory` (list of `{name, active, code_based}` or null),
