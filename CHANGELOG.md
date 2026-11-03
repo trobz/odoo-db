@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.30.0 (2026-11-03)
+
+### Bug Fixes
+
+- **prepare-audit**: Exclude every user sharing an --admin-user login
+  ([`f1a1181`](https://github.com/trobz/odoo-db/commit/f1a1181b5bf1357f0f51e79690d02e45eeb6a63c))
+
+### Features
+
+- **prepare-audit**: Export user ids instead of logins for customized records
+  ([`18d4dd3`](https://github.com/trobz/odoo-db/commit/18d4dd3476507b03180d9c90c256a7d4d1abd007))
+
+
 ## v1.29.0 (2026-10-22)
 
 ### Features
