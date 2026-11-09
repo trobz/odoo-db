@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.31.0 (2026-11-09)
+
+### Bug Fixes
+
+- **prepare-audit**: Keep depends closed over installed modules
+  ([`d9ee4ef`](https://github.com/trobz/odoo-db/commit/d9ee4effbe3d00f0004e2708fab2858c0c886cd8))
+
+### Features
+
+- **prepare-audit**: Export module dependencies and origin
+  ([`728aee8`](https://github.com/trobz/odoo-db/commit/728aee8ba05021d15167feb8ac9677313145690a))
+
+
 ## v1.30.0 (2026-11-03)
 
 ### Bug Fixes
