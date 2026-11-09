@@ -165,7 +165,11 @@ dump won't tell you):
   `--admin-user LOGIN` (repeatable) excludes a specific login from the
   `customized_records` scan — useful when the primary admin uses a personal
   account instead of the system `admin` user.
-  Additional bundle fields: `orphan_fields` (list of `{table, column, reason}`),
+  Additional bundle fields: `orphan_fields` (list of `{table, column,
+  data_type}`: columns of real tables, not SQL-view report models, with no
+  `ir_model_fields` row; columns core creates with raw SQL —
+  `ir_module_module.web`, `res_users_apikeys`/`auth_totp_device`
+  `key`/`index` — are skipped via `db._NATIVE_UNMAPPED_COLUMNS`),
   `customized_records` (list of `{model, module, xml_id, modified_by_id,
   noupdate}`; the editor's login is added as `modified_by` only with the
   global `--include-sensitive-information`, so the bundle carries no login by
