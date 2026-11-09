@@ -669,6 +669,14 @@ def _has_res_users_log(cur: psycopg.Cursor) -> bool:
     return _fetch_one(cur)[0] is not None
 
 
+def _has_model_inherit(cur: psycopg.Cursor) -> bool:
+    """`ir_model_inherit` exists (Odoo 17+): one row per (model, parent) pair
+    of a model's `_inherit`. Older versions store no inheritance graph at
+    all, so a custom model's mixins can't be read from the database there."""
+    cur.execute("SELECT to_regclass('public.ir_model_inherit')")
+    return _fetch_one(cur)[0] is not None
+
+
 def compute_mfa(*, totp_set: bool, passkey_count: int, share: bool, totp_policy: str | None) -> str:
     """Comma-joined set of a user's active MFA methods, or ``"none"``.
 
@@ -2281,8 +2289,7 @@ def _studio_records_detail(
             ]
 
         elif odoo_model == "ir.model.inherit":
-            cur.execute("SELECT 1 FROM pg_tables WHERE tablename = 'ir_model_inherit'")
-            if cur.fetchone():
+            if _has_model_inherit(cur):
                 cur.execute(
                     """
                     SELECT inh.id, child.model AS child_model, parent.model AS inherits_from
@@ -2407,18 +2414,21 @@ def get_studio_customizations(cur: psycopg.Cursor) -> dict:
     """)
     custom_models = [{"model": r[0], "name": _as_str(r[1]), "custom_fields": r[2]} for r in cur.fetchall()]
 
-    # Mixins per custom model (mail.thread, mail.activity.mixin, etc.)
-    cur.execute("""
-        SELECT DISTINCT child.model, parent.model AS mixin
-        FROM ir_model_inherit inh
-        JOIN ir_model child ON inh.model_id = child.id
-        JOIN ir_model parent ON inh.parent_id = parent.id
-        WHERE child.state = 'manual'
-        ORDER BY child.model, parent.model
-    """)
+    # Mixins per custom model (mail.thread, mail.activity.mixin, etc.).
+    # `ir_model_inherit` is Odoo 17+; before that mixins are unknown and the
+    # list stays empty rather than failing the whole command.
     mixins_by_model: dict[str, list[str]] = {}
-    for child_model, mixin in cur.fetchall():
-        mixins_by_model.setdefault(child_model, []).append(mixin)
+    if _has_model_inherit(cur):
+        cur.execute("""
+            SELECT DISTINCT child.model, parent.model AS mixin
+            FROM ir_model_inherit inh
+            JOIN ir_model child ON inh.model_id = child.id
+            JOIN ir_model parent ON inh.parent_id = parent.id
+            WHERE child.state = 'manual'
+            ORDER BY child.model, parent.model
+        """)
+        for child_model, mixin in cur.fetchall():
+            mixins_by_model.setdefault(child_model, []).append(mixin)
     for m in custom_models:
         m["mixins"] = mixins_by_model.get(m["model"], [])
 

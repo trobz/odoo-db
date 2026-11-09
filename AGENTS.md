@@ -157,7 +157,9 @@ dump won't tell you):
   (`YYYY-MM` keys sort chronologically as strings) so the two always agree —
   the same aggregate-only, NDA-free contract (`never` also goes in the echo
   summary line).
-  `studio_customizations` carries custom models (with `mixins` list),
+  `studio_customizations` carries custom models (with `mixins` list, read
+  from `ir_model_inherit`, which only exists on Odoo 17+: probed via
+  `_has_model_inherit`, and `[]` before 17 rather than an error),
   extended models (with full `fields` detail), and studio-flagged records
   by type (menu records include `full_path`).
   `--admin-user LOGIN` (repeatable) excludes a specific login from the
@@ -651,11 +653,11 @@ documents the CLI for the free-audit landing on `migration.trobz.com`.
   runs a `postgres` service and loads the synthetic per-version fixtures
   (`tests/fixtures/versions/`) into throwaway databases, then asserts odoo-db's
   version-shape probes (`_has_res_users_log`, `_has_totp_secret`, `_has_passkey`,
-  `_has_cron_failure_tracking`, `_has_cron_progress`, presence table,
+  `_has_cron_failure_tracking`, `_has_cron_progress`, `_has_model_inherit`, presence table,
   `_groups_category_sql`), the `last_login` source resolves correctly (not just
   non-null), and the shape-sensitive commands — db layer and the Typer CLI
   (`users --summarize`/`--all`, `crons`/`--running`, `groups`, plus the
-  `prepare-audit` probes) — run with the right shape, and agree with each version's
+  `prepare-audit` probes and its studio scan) — run with the right shape, and agree with each version's
   `manifest.json` entry. `groups` exercises the real category join
   (`category_id`/`privilege_id`) and `_localize` over jsonb translated names
   (16.0+), which the fixtures model. Single job, not a per-version matrix, because the

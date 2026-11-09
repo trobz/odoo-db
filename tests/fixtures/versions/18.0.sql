@@ -63,3 +63,11 @@ UPDATE res_groups SET category_id = 1;
 ALTER TABLE res_groups ALTER COLUMN name TYPE jsonb USING jsonb_build_object('en_US', name);
 ALTER TABLE ir_module_category ALTER COLUMN name TYPE jsonb USING jsonb_build_object('en_US', name);
 ALTER TABLE ir_act_server ALTER COLUMN name TYPE jsonb USING jsonb_build_object('en_US', name);
+
+-- 17.0+: ir.model.inherit stores each model's `_inherit` parents.
+CREATE TABLE ir_model_inherit (
+    id serial PRIMARY KEY,
+    model_id integer,
+    parent_id integer
+);
+INSERT INTO ir_model_inherit (model_id, parent_id) VALUES (2, 3);

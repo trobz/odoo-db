@@ -75,6 +75,7 @@ def test_shape_probes(fixture_db):
         assert db._has_passkey(cur) == exp["has_passkey_table"]
         assert db._has_cron_failure_tracking(cur) == exp["has_cron_failure_cols"]
         assert db._has_cron_progress(cur) == exp["has_cron_progress"]
+        assert db._has_model_inherit(cur) == exp["has_model_inherit"]
         assert _presence_table(cur) == exp["presence_table"]
         assert _groups_source(cur) == exp["groups_category_source"]
         assert _last_login_source(cur) == exp["last_login_source"]
@@ -133,6 +134,13 @@ def test_shape_sensitive_commands_complete(fixture_db):
         assert last_login["never"] == 1
         inventory = db.get_cron_inventory(cur)
         assert inventory and {"name", "active", "code_based", "has_xmlid"} <= set(inventory[0])
+
+        # studio scan: ir_model_inherit only exists on 17+, so the mixins of a
+        # custom model are read there and left empty before, never an error.
+        studio = db.get_studio_customizations(cur)
+        assert [m["model"] for m in studio["custom_models"]] == ["x_custom"]
+        expected_mixins = ["mail.thread"] if exp["has_model_inherit"] else []
+        assert studio["custom_models"][0]["mixins"] == expected_mixins
 
 
 def test_cli_commands_run(fixture_db):
