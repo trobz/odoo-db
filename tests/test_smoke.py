@@ -1959,3 +1959,10 @@ def test_get_orphan_fields_skips_native_columns_and_views():
     assert [(r["table"], r["column"]) for r in rows] == [("res_partner", "x_legacy"), ("sale_order", "key")]
     # SQL-view report models (_auto = False) have no fields to match: base tables only
     assert "t.table_type = 'BASE TABLE'" in cur.queries[0][0]
+
+
+def test_queue_job_notify_trigger_and_function_both_recognized():
+    # queue_job installs a trigger and the function it runs under the same
+    # name; recognizing only the trigger reported the function as custom.
+    assert "queue_job_notify" in db._RECOGNIZED_TRIGGERS
+    assert "queue_job_notify" in db._RECOGNIZED_FUNCTIONS

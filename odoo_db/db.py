@@ -44,9 +44,10 @@ _BASE_TABLE_NAME_OVERRIDES: dict[str, str] = {
 # only with widely-deployed objects whose origin is unambiguous.
 _RECOGNIZED_FUNCTIONS: dict[str, str] = {
     "unaccent": "Postgres unaccent extension wrapper (Odoo uses it for accent-insensitive search).",
+    "queue_job_notify": "OCA queue_job module — trigger function the queue_job_notify trigger runs (pg_notify).",
 }
 _RECOGNIZED_TRIGGERS: dict[str, str] = {
-    "queue_job_notify": "OCA queue_job module — NOTIFY trigger on queue_job inserts.",
+    "queue_job_notify": "OCA queue_job module — NOTIFY trigger on queue_job changes, wakes the job runner.",
 }
 
 
