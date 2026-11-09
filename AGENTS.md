@@ -174,8 +174,31 @@ dump won't tell you):
   `attachment_stats` (`{storage: {count, total_size}}` or null),
   `cron_inventory` (list of `{name, active, code_based}` or null),
   `company_count` (int).
-  Module entries in `modules` include `dependent_count` (number of installed
-  modules that depend on it) added at `prepare-audit` time.
+  Module entries in `modules` include `depends` (sorted direct dependencies
+  the module declares that are themselves installed, `[]` for `base`),
+  `uninstalled_depends` (declared dependencies that are *not* installed) and
+  `dependent_count` (number of installed modules that declare it in
+  `depends`), all added at `prepare-audit` time from one query
+  (`db.get_module_dependencies`, rows of `ir_module_module_dependency` whose
+  declaring module is installed, left-joined to the depended-on module's
+  state); `dependent_count` is the pure inversion
+  `db.count_module_dependents`, so the two can't disagree. `depends` is the
+  edge list a consumer needs to order a migration topologically — a count
+  alone isn't a graph. It is closed over installed modules on purpose: the
+  module-list update rewrites dependency rows from the manifests on disk for
+  installed modules too, so a dependency added without `-u`, or an addon
+  removed from the addons path, leaves an installed module declaring a
+  non-installed name — common on databases received for an audit. Those go
+  to `uninstalled_depends` (an anomaly worth reporting, not an edge to sort
+  on). Sorted with `COLLATE "C"` so the lists don't depend on the server's
+  collation (`en_US.UTF-8` ignores `_` at first level). Neither list is
+  transitive: consumers compute the closure themselves.
+  They also carry `author`/`website` (`db.get_module_origins`, plain Char
+  columns on `ir_module_module` on every version, `''` normalized to `None`)
+  so a consumer can split core/OCA/custom modules — e.g. to count the core
+  modules a custom one depends on. Fetched separately rather than added to
+  `get_modules`, whose default shape the `modules` command (and
+  odoo-activity) relies on.
 - Every table in `stats.tables` and `orphan_tables` gets a
   `functional_group` = first underscore component of the table name
   (`purchase_order_line` → `purchase`). Display-only bucket, **not** an

@@ -286,21 +286,74 @@ def get_modules(cur: psycopg.Cursor, *, include_uninstalled: bool = False) -> li
     ]
 
 
-def get_module_dependents(cur: psycopg.Cursor) -> dict[str, int]:
-    """Return {module_name: count_of_installed_modules_that_depend_on_it}.
+def get_module_dependencies(cur: psycopg.Cursor) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Return ``(depends, uninstalled_depends)``, each ``{installed_module: sorted([names])}``.
 
-    Uses ir_module_module_dependency where `name` is the dependency string
-    and module_id FK points to the module that declares the dependency.
-    Only counts installed modules on both sides.
+    Reads ``ir_module_module_dependency``, where ``module_id`` points to the
+    module declaring the dependency and ``name`` is the depended-on module
+    (a plain string, as written in the manifest's ``depends``). Only rows
+    whose *declaring* module is installed are read.
+
+    A declared dependency is **not** guaranteed to be installed: the
+    module-list update rewrites the dependency rows of every module from its
+    manifest on disk, installed ones included. A dependency added to the
+    manifest without ``-u`` on the module, or one whose addon left the
+    addons path, leaves an installed module declaring a non-installed (or
+    entirely unknown) name. Such names go to ``uninstalled_depends`` instead
+    of ``depends``, so ``depends`` stays a closed graph over installed
+    modules (safe to sort topologically) while the anomaly stays visible.
+
+    Sorted with ``COLLATE "C"``: the database's own collation (e.g.
+    ``en_US.UTF-8`` ignores ``_`` at first level, putting ``salesman`` before
+    ``sale_stock``) would make the same graph serialize differently across
+    servers. Installed modules with no dependency (``base``) are absent;
+    callers default to ``[]``.
     """
     cur.execute("""
-        SELECT d.name, count(*) AS cnt
+        SELECT m.name, d.name, COALESCE(dm.state = 'installed', false)
         FROM ir_module_module_dependency d
         JOIN ir_module_module m ON m.id = d.module_id
+        LEFT JOIN ir_module_module dm ON dm.name = d.name
         WHERE m.state = 'installed'
-        GROUP BY d.name
+        ORDER BY m.name COLLATE "C", d.name COLLATE "C"
     """)
-    return {r[0]: r[1] for r in cur.fetchall()}
+    deps: dict[str, list[str]] = {}
+    uninstalled: dict[str, list[str]] = {}
+    for module, depends_on, installed in cur.fetchall():
+        (deps if installed else uninstalled).setdefault(module, []).append(depends_on)
+    return deps, uninstalled
+
+
+def get_module_origins(cur: psycopg.Cursor) -> dict[str, dict[str, str | None]]:
+    """Return ``{installed_module: {"author": ..., "website": ...}}``.
+
+    Both are plain (non-translated) Char columns on ``ir_module_module``,
+    copied from the manifest at module-list update, and present on every
+    version. They are what tells a core module (``Odoo S.A.``) from an OCA
+    one (``Odoo Community Association (OCA)``) from a custom one, which the
+    module name alone can't. Kept out of ``get_modules`` so the ``modules``
+    command's default shape (read by odoo-activity) doesn't change. Empty
+    strings are normalized to ``None``.
+    """
+    cur.execute("""
+        SELECT name, author, website
+        FROM ir_module_module
+        WHERE state = 'installed'
+    """)
+    return {name: {"author": author or None, "website": website or None} for name, author, website in cur.fetchall()}
+
+
+def count_module_dependents(dependencies: dict[str, list[str]]) -> dict[str, int]:
+    """Return ``{module: number of installed modules that declare it in depends}``.
+
+    Pure inversion of ``get_module_dependencies``' ``depends`` output (direct
+    dependents only, not the transitive closure).
+    """
+    counts: dict[str, int] = {}
+    for depends in dependencies.values():
+        for name in depends:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def get_model_owners(cur: psycopg.Cursor) -> dict[str, str]:

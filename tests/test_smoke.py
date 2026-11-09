@@ -1828,8 +1828,12 @@ def _run_prepare_audit(monkeypatch, tmp_path, *extra_global_args):
             name, "17.0", flags={}, module_count=1, user_count=1
         ),
         "cursor": lambda _name: nullcontext(),
-        "get_modules": lambda _cur: [],
-        "get_module_dependents": lambda _cur: {},
+        "get_modules": lambda _cur: [
+            {"name": "base", "version": "17.0.1.0", "auto_install": False},
+            {"name": "sale", "version": "17.0.1.0", "auto_install": False},
+        ],
+        "get_module_dependencies": lambda _cur: ({"sale": ["base", "mail"]}, {"sale": ["sale_gone"]}),
+        "get_module_origins": lambda _cur: {"sale": {"author": "Odoo S.A.", "website": "https://www.odoo.com"}},
         "get_model_owners": lambda _cur: {},
         "get_stats": lambda _cur, **_kw: {"db_size": "1 MB", "years": [], "tables": []},
         "get_not_odoo": lambda _cur: {"views": [], "triggers": [], "functions": [], "procedures": [], "recognized": {}},
@@ -1893,3 +1897,48 @@ def test_prepare_audit_warns_on_unknown_admin_user(monkeypatch, tmp_path):
     result, _payload, _captured = _run_prepare_audit(monkeypatch, tmp_path)
     assert "typo@acme.com" in result.output
     assert "not found" in result.output
+
+
+def test_get_module_dependencies_groups_rows_per_module():
+    cur = _FakeFetchallCursor([
+        ("sale", "base", True),
+        ("sale", "mail", True),
+        ("sale", "sale_gone", False),
+        ("sale_stock", "sale", True),
+    ])
+    deps, uninstalled = db.get_module_dependencies(cur)  # ty: ignore[invalid-argument-type]
+    assert deps == {"sale": ["base", "mail"], "sale_stock": ["sale"]}
+    assert uninstalled == {"sale": ["sale_gone"]}
+    query = cur.queries[0][0]
+    assert "m.state = 'installed'" in query
+    assert 'COLLATE "C"' in query
+
+
+def test_count_module_dependents_inverts_direct_dependencies():
+    deps = {"sale": ["base", "mail"], "sale_stock": ["sale", "base"], "mail": ["base"]}
+    assert db.count_module_dependents(deps) == {"base": 3, "mail": 1, "sale": 1}
+    assert db.count_module_dependents({}) == {}
+
+
+def test_prepare_audit_exports_module_dependencies(monkeypatch, tmp_path):
+    result, payload, _captured = _run_prepare_audit(monkeypatch, tmp_path)
+    assert result.exit_code == 0, result.output
+    modules = {m["name"]: m for m in payload["modules"]}
+    assert modules["sale"]["depends"] == ["base", "mail"]
+    assert modules["base"]["depends"] == []
+    assert modules["sale"]["uninstalled_depends"] == ["sale_gone"]
+    assert modules["base"]["uninstalled_depends"] == []
+    assert modules["base"]["dependent_count"] == 1
+    assert modules["sale"]["dependent_count"] == 0
+    assert modules["sale"]["author"] == "Odoo S.A."
+    assert modules["sale"]["website"] == "https://www.odoo.com"
+    assert modules["base"]["author"] is None and modules["base"]["website"] is None
+
+
+def test_get_module_origins_normalizes_empty_values():
+    cur = _FakeFetchallCursor([("sale", "Odoo S.A.", ""), ("custom_x", None, "https://acme.test")])
+    assert db.get_module_origins(cur) == {  # ty: ignore[invalid-argument-type]
+        "sale": {"author": "Odoo S.A.", "website": None},
+        "custom_x": {"author": None, "website": "https://acme.test"},
+    }
+    assert "state = 'installed'" in cur.queries[0][0]
