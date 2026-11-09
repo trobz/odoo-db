@@ -1807,7 +1807,8 @@ def cmd_prepare_audit(
         exclude_logins = list(admin_users) if admin_users else []
         with db.cursor(db_name) as cur:
             modules_data = db.get_modules(cur)
-            module_dependents = db.get_module_dependents(cur)
+            module_dependencies = db.get_module_dependencies(cur)
+            module_origins = db.get_module_origins(cur)
             model_owners = db.get_model_owners(cur)
             stats_data = db.get_stats(cur, years=years, top=top, model_owners=model_owners)
             not_odoo_data = db.get_not_odoo(cur)
@@ -1831,7 +1832,10 @@ def cmd_prepare_audit(
             attachment_stats = db.get_attachment_stats(cur)
             cron_inventory = db.get_cron_inventory(cur)
             company_count = db.get_company_count(cur)
+        module_dependents = db.count_module_dependents(module_dependencies)
         for m in modules_data:
+            m.update(module_origins.get(m["name"], {"author": None, "website": None}))
+            m["depends"] = module_dependencies.get(m["name"], [])
             m["dependent_count"] = module_dependents.get(m["name"], 0)
         orphan_tables = db.get_orphan_tables(stats_data["tables"], model_owners, modules_data)
 

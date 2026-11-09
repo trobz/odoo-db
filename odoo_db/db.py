@@ -286,21 +286,59 @@ def get_modules(cur: psycopg.Cursor, *, include_uninstalled: bool = False) -> li
     ]
 
 
-def get_module_dependents(cur: psycopg.Cursor) -> dict[str, int]:
-    """Return {module_name: count_of_installed_modules_that_depend_on_it}.
+def get_module_dependencies(cur: psycopg.Cursor) -> dict[str, list[str]]:
+    """Return ``{installed_module: sorted([declared dependency names])}``.
 
-    Uses ir_module_module_dependency where `name` is the dependency string
-    and module_id FK points to the module that declares the dependency.
-    Only counts installed modules on both sides.
+    Reads ``ir_module_module_dependency``, where ``module_id`` points to the
+    module declaring the dependency and ``name`` is the depended-on module
+    (a plain string, as written in the manifest's ``depends``). Only the
+    *declaring* side is filtered on ``installed``: an installed module's
+    dependencies are installed too by construction. Installed modules with
+    no dependency (``base``) are absent; callers default to ``[]``.
     """
     cur.execute("""
-        SELECT d.name, count(*) AS cnt
+        SELECT m.name, d.name
         FROM ir_module_module_dependency d
         JOIN ir_module_module m ON m.id = d.module_id
         WHERE m.state = 'installed'
-        GROUP BY d.name
+        ORDER BY 1, 2
     """)
-    return {r[0]: r[1] for r in cur.fetchall()}
+    deps: dict[str, list[str]] = {}
+    for module, depends_on in cur.fetchall():
+        deps.setdefault(module, []).append(depends_on)
+    return deps
+
+
+def get_module_origins(cur: psycopg.Cursor) -> dict[str, dict[str, str | None]]:
+    """Return ``{installed_module: {"author": ..., "website": ...}}``.
+
+    Both are plain (non-translated) Char columns on ``ir_module_module``,
+    copied from the manifest at module-list update, and present on every
+    version. They are what tells a core module (``Odoo S.A.``) from an OCA
+    one (``Odoo Community Association (OCA)``) from a custom one, which the
+    module name alone can't. Kept out of ``get_modules`` so the ``modules``
+    command's default shape (read by odoo-activity) doesn't change. Empty
+    strings are normalized to ``None``.
+    """
+    cur.execute("""
+        SELECT name, author, website
+        FROM ir_module_module
+        WHERE state = 'installed'
+    """)
+    return {name: {"author": author or None, "website": website or None} for name, author, website in cur.fetchall()}
+
+
+def count_module_dependents(dependencies: dict[str, list[str]]) -> dict[str, int]:
+    """Return ``{module: number of installed modules that declare it in depends}``.
+
+    Pure inversion of ``get_module_dependencies``' output (direct dependents
+    only, not the transitive closure).
+    """
+    counts: dict[str, int] = {}
+    for depends in dependencies.values():
+        for name in depends:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def get_model_owners(cur: psycopg.Cursor) -> dict[str, str]:

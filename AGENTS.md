@@ -174,8 +174,21 @@ dump won't tell you):
   `attachment_stats` (`{storage: {count, total_size}}` or null),
   `cron_inventory` (list of `{name, active, code_based}` or null),
   `company_count` (int).
-  Module entries in `modules` include `dependent_count` (number of installed
-  modules that depend on it) added at `prepare-audit` time.
+  Module entries in `modules` include `depends` (sorted direct dependencies
+  the module declares, `[]` for `base`) and `dependent_count` (number of
+  installed modules that declare it in `depends`), both added at
+  `prepare-audit` time from one query (`db.get_module_dependencies`, rows of
+  `ir_module_module_dependency` whose declaring module is installed);
+  `dependent_count` is the pure inversion `db.count_module_dependents`, so the
+  two can't disagree. `depends` is the edge list a consumer needs to order a
+  migration topologically — a count alone isn't a graph. Neither is transitive:
+  consumers compute the closure themselves.
+  They also carry `author`/`website` (`db.get_module_origins`, plain Char
+  columns on `ir_module_module` on every version, `''` normalized to `None`)
+  so a consumer can split core/OCA/custom modules — e.g. to count the core
+  modules a custom one depends on. Fetched separately rather than added to
+  `get_modules`, whose default shape the `modules` command (and
+  odoo-activity) relies on.
 - Every table in `stats.tables` and `orphan_tables` gets a
   `functional_group` = first underscore component of the table name
   (`purchase_order_line` → `purchase`). Display-only bucket, **not** an
