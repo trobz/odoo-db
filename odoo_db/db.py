@@ -286,27 +286,42 @@ def get_modules(cur: psycopg.Cursor, *, include_uninstalled: bool = False) -> li
     ]
 
 
-def get_module_dependencies(cur: psycopg.Cursor) -> dict[str, list[str]]:
-    """Return ``{installed_module: sorted([declared dependency names])}``.
+def get_module_dependencies(cur: psycopg.Cursor) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Return ``(depends, uninstalled_depends)``, each ``{installed_module: sorted([names])}``.
 
     Reads ``ir_module_module_dependency``, where ``module_id`` points to the
     module declaring the dependency and ``name`` is the depended-on module
-    (a plain string, as written in the manifest's ``depends``). Only the
-    *declaring* side is filtered on ``installed``: an installed module's
-    dependencies are installed too by construction. Installed modules with
-    no dependency (``base``) are absent; callers default to ``[]``.
+    (a plain string, as written in the manifest's ``depends``). Only rows
+    whose *declaring* module is installed are read.
+
+    A declared dependency is **not** guaranteed to be installed: the
+    module-list update rewrites the dependency rows of every module from its
+    manifest on disk, installed ones included. A dependency added to the
+    manifest without ``-u`` on the module, or one whose addon left the
+    addons path, leaves an installed module declaring a non-installed (or
+    entirely unknown) name. Such names go to ``uninstalled_depends`` instead
+    of ``depends``, so ``depends`` stays a closed graph over installed
+    modules (safe to sort topologically) while the anomaly stays visible.
+
+    Sorted with ``COLLATE "C"``: the database's own collation (e.g.
+    ``en_US.UTF-8`` ignores ``_`` at first level, putting ``salesman`` before
+    ``sale_stock``) would make the same graph serialize differently across
+    servers. Installed modules with no dependency (``base``) are absent;
+    callers default to ``[]``.
     """
     cur.execute("""
-        SELECT m.name, d.name
+        SELECT m.name, d.name, COALESCE(dm.state = 'installed', false)
         FROM ir_module_module_dependency d
         JOIN ir_module_module m ON m.id = d.module_id
+        LEFT JOIN ir_module_module dm ON dm.name = d.name
         WHERE m.state = 'installed'
-        ORDER BY 1, 2
+        ORDER BY m.name COLLATE "C", d.name COLLATE "C"
     """)
     deps: dict[str, list[str]] = {}
-    for module, depends_on in cur.fetchall():
-        deps.setdefault(module, []).append(depends_on)
-    return deps
+    uninstalled: dict[str, list[str]] = {}
+    for module, depends_on, installed in cur.fetchall():
+        (deps if installed else uninstalled).setdefault(module, []).append(depends_on)
+    return deps, uninstalled
 
 
 def get_module_origins(cur: psycopg.Cursor) -> dict[str, dict[str, str | None]]:
@@ -331,8 +346,8 @@ def get_module_origins(cur: psycopg.Cursor) -> dict[str, dict[str, str | None]]:
 def count_module_dependents(dependencies: dict[str, list[str]]) -> dict[str, int]:
     """Return ``{module: number of installed modules that declare it in depends}``.
 
-    Pure inversion of ``get_module_dependencies``' output (direct dependents
-    only, not the transitive closure).
+    Pure inversion of ``get_module_dependencies``' ``depends`` output (direct
+    dependents only, not the transitive closure).
     """
     counts: dict[str, int] = {}
     for depends in dependencies.values():
