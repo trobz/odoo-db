@@ -45,7 +45,8 @@ then change what moved, e.g. `bus_presence` → `mail_presence`,
 | 8.0 | `res_users.login_date` real column; **no** `res_users_log`; no presence table |
 | 9.0 | `res_users_log` appears (no more `login_date` column); `bus_presence` |
 | 12.0, 13.0 | same probe-shape as 9.0 (`res_users_log`, `bus_presence`, `category_id`) |
-| 14.0, 16.0, 17.0 | `auth_totp` → `res_users.totp_secret` |
+| 14.0, 16.0 | `auth_totp` → `res_users.totp_secret` |
+| 17.0 | `ir_model_inherit` (a model's `_inherit` parents; mixins of custom models in the studio scan) |
 | 18.0 | `ir_cron.failure_count`/`first_failure_date` + `ir_cron_progress`; `auth_passkey` → `auth_passkey_key` |
 | 19.0, 20.0 | `bus_presence` → `mail_presence`; `res_groups.category_id` → `privilege_id` → `res_groups_privilege` |
 

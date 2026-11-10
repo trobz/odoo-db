@@ -78,9 +78,31 @@ INSERT INTO res_groups (id, name) VALUES (1, 'Settings'), (2, 'Access Rights');
 -- ir_act_server.model_id -> ir_model is what the running-crons query joins on.
 CREATE TABLE ir_model (
     id serial PRIMARY KEY,
-    model text
+    model text,
+    name text,
+    state text DEFAULT 'base'
 );
-INSERT INTO ir_model (id, model) VALUES (1, 'mail.mail');
+-- x_custom is a Studio/manual model: `prepare-audit`'s studio scan reads
+-- ir_model.state = 'manual' and, on 17+, its mixins from ir_model_inherit.
+INSERT INTO ir_model (id, model, name, state) VALUES
+    (1, 'mail.mail', 'Outgoing Mails', 'base'),
+    (2, 'x_custom', 'Custom', 'manual'),
+    (3, 'mail.thread', 'Email Thread', 'base');
+
+CREATE TABLE ir_model_fields (
+    id serial PRIMARY KEY,
+    model_id integer,
+    name text,
+    ttype text,
+    field_description text,
+    relation text,
+    required boolean,
+    readonly boolean,
+    store boolean,
+    state text DEFAULT 'base'
+);
+INSERT INTO ir_model_fields (model_id, name, ttype, field_description, state) VALUES
+    (2, 'x_name', 'char', 'Name', 'manual');
 
 CREATE TABLE ir_act_server (
     id serial PRIMARY KEY,

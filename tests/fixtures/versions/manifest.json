@@ -12,7 +12,8 @@
       "has_cron_failure_cols": false,
       "has_cron_progress": false,
       "presence_table": null,
-      "groups_category_source": "category_id"
+      "groups_category_source": "category_id",
+      "has_model_inherit": false
     }
   },
   {
@@ -28,7 +29,8 @@
       "has_cron_failure_cols": false,
       "has_cron_progress": false,
       "presence_table": "bus_presence",
-      "groups_category_source": "category_id"
+      "groups_category_source": "category_id",
+      "has_model_inherit": false
     }
   },
   {
@@ -44,7 +46,8 @@
       "has_cron_failure_cols": false,
       "has_cron_progress": false,
       "presence_table": "bus_presence",
-      "groups_category_source": "category_id"
+      "groups_category_source": "category_id",
+      "has_model_inherit": false
     }
   },
   {
@@ -60,7 +63,8 @@
       "has_cron_failure_cols": false,
       "has_cron_progress": false,
       "presence_table": "bus_presence",
-      "groups_category_source": "category_id"
+      "groups_category_source": "category_id",
+      "has_model_inherit": false
     }
   },
   {
@@ -76,7 +80,8 @@
       "has_cron_failure_cols": false,
       "has_cron_progress": false,
       "presence_table": "bus_presence",
-      "groups_category_source": "category_id"
+      "groups_category_source": "category_id",
+      "has_model_inherit": false
     }
   },
   {
@@ -92,7 +97,8 @@
       "has_cron_failure_cols": false,
       "has_cron_progress": false,
       "presence_table": "bus_presence",
-      "groups_category_source": "category_id"
+      "groups_category_source": "category_id",
+      "has_model_inherit": false
     }
   },
   {
@@ -108,7 +114,8 @@
       "has_cron_failure_cols": false,
       "has_cron_progress": false,
       "presence_table": "bus_presence",
-      "groups_category_source": "category_id"
+      "groups_category_source": "category_id",
+      "has_model_inherit": true
     }
   },
   {
@@ -124,7 +131,8 @@
       "has_cron_failure_cols": true,
       "has_cron_progress": true,
       "presence_table": "bus_presence",
-      "groups_category_source": "category_id"
+      "groups_category_source": "category_id",
+      "has_model_inherit": true
     }
   },
   {
@@ -140,7 +148,8 @@
       "has_cron_failure_cols": true,
       "has_cron_progress": true,
       "presence_table": "mail_presence",
-      "groups_category_source": "privilege_id"
+      "groups_category_source": "privilege_id",
+      "has_model_inherit": true
     }
   },
   {
@@ -156,7 +165,8 @@
       "has_cron_failure_cols": true,
       "has_cron_progress": true,
       "presence_table": "mail_presence",
-      "groups_category_source": "privilege_id"
+      "groups_category_source": "privilege_id",
+      "has_model_inherit": true
     }
   }
 ]
