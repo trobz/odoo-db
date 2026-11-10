@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.31.1 (2026-11-10)
+
+### Bug Fixes
+
+- **studio**: Don't fail prepare-audit before Odoo 17
+  ([`0c9cedb`](https://github.com/trobz/odoo-db/commit/0c9cedb1687fee8136cbfa74c178ded72641e36e))
+
+
 ## v1.31.0 (2026-11-09)
 
 ### Bug Fixes
