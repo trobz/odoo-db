@@ -664,7 +664,10 @@ documents the CLI for the free-audit landing on `migration.trobz.com`.
   `prepare-audit` probes and its studio scan) — run with the right shape, and agree with each version's
   `manifest.json` entry. `groups` exercises the real category join
   (`category_id`/`privilege_id`) and `_localize` over jsonb translated names
-  (16.0+), which the fixtures model. Single job, not a per-version matrix, because the
+  (16.0+), which the fixtures model. `get_orphan_fields`' base-table filter is
+  checked against a real SQL view (a report model), which that test adds in a
+  transaction it rolls back, leaving the shared per-version database untouched.
+  Single job, not a per-version matrix, because the
   fixtures are tiny in-process SQL loads; it becomes a matrix only if real
   neutralized dumps replace the synthetic SQL. `tests/test_fixtures.py` is
   parametrized over the manifest (the oracle — no second hardcoded copy) and

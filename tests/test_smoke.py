@@ -1956,7 +1956,10 @@ def test_get_orphan_fields_skips_native_columns_and_views():
         ("sale_order", "key", "character varying"),
     ])
     rows = db.get_orphan_fields(cur)  # ty: ignore[invalid-argument-type]
-    assert [(r["table"], r["column"]) for r in rows] == [("res_partner", "x_legacy"), ("sale_order", "key")]
+    assert rows == [
+        {"table": "res_partner", "column": "x_legacy", "data_type": "integer"},
+        {"table": "sale_order", "column": "key", "data_type": "character varying"},
+    ]
     # SQL-view report models (_auto = False) have no fields to match: base tables only
     assert "t.table_type = 'BASE TABLE'" in cur.queries[0][0]
 
