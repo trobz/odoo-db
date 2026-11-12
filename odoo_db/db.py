@@ -44,9 +44,10 @@ _BASE_TABLE_NAME_OVERRIDES: dict[str, str] = {
 # only with widely-deployed objects whose origin is unambiguous.
 _RECOGNIZED_FUNCTIONS: dict[str, str] = {
     "unaccent": "Postgres unaccent extension wrapper (Odoo uses it for accent-insensitive search).",
+    "queue_job_notify": "OCA queue_job module — trigger function the queue_job_notify trigger runs (pg_notify).",
 }
 _RECOGNIZED_TRIGGERS: dict[str, str] = {
-    "queue_job_notify": "OCA queue_job module — NOTIFY trigger on queue_job inserts.",
+    "queue_job_notify": "OCA queue_job module — NOTIFY trigger on queue_job changes, wakes the job runner.",
 }
 
 
@@ -2491,12 +2492,30 @@ def get_studio_customizations(cur: psycopg.Cursor) -> dict:
     }
 
 
+# Columns core creates with raw SQL rather than through a field, so they never
+# get an ir_model_fields row and would otherwise be reported as orphans on
+# every database:
+# - ir_module_module.web: created by base_data.sql with the table itself, no
+#   field has read it for many versions.
+# - res_users_apikeys.key/index: res.users.apikeys (14.0+) creates its table
+#   in init() and keeps the hashed key and its lookup prefix out of the ORM
+#   on purpose; auth_totp_device (auth_totp, 15.0+) inherits that table shape.
+_NATIVE_UNMAPPED_COLUMNS: dict[str, frozenset[str]] = {
+    "ir_module_module": frozenset({"web"}),
+    "res_users_apikeys": frozenset({"key", "index"}),
+    "auth_totp_device": frozenset({"key", "index"}),
+}
+
+
 def get_orphan_fields(cur: psycopg.Cursor) -> list[dict]:
     """Return DB columns that exist in Odoo model tables but have no ir_model_fields entry.
 
     These are ghost columns — left behind by uninstalled modules or direct SQL DDL.
-    Only checks tables whose name matches an ir_model entry (replace('.','_')).
-    Excludes ORM meta-columns always present in every table.
+    Only checks tables whose name matches an ir_model entry (replace('.','_')),
+    and only real tables: an ``_auto = False`` report model is a SQL view whose
+    columns need no field and can't be left behind. Excludes ORM meta-columns
+    always present in every table, and the columns core creates outside the
+    ORM (``_NATIVE_UNMAPPED_COLUMNS``).
     """
     cur.execute("""
         WITH model_cols AS (
@@ -2510,16 +2529,23 @@ def get_orphan_fields(cur: psycopg.Cursor) -> list[dict]:
         )
         SELECT c.table_name, c.column_name, c.data_type
         FROM information_schema.columns c
+        JOIN information_schema.tables t
+          ON t.table_schema = c.table_schema AND t.table_name = c.table_name
         JOIN odoo_tables ot ON ot.tbl = c.table_name
         LEFT JOIN model_cols mc ON mc.tbl = c.table_name AND mc.col = c.column_name
         WHERE c.table_schema = 'public'
+          AND t.table_type = 'BASE TABLE'
           AND mc.col IS NULL
           AND c.column_name NOT IN (
               'id', 'create_uid', 'create_date', 'write_uid', 'write_date'
           )
         ORDER BY c.table_name, c.column_name
     """)
-    return [{"table": r[0], "column": r[1], "data_type": r[2]} for r in cur.fetchall()]
+    return [
+        {"table": table, "column": column, "data_type": data_type}
+        for table, column, data_type in cur.fetchall()
+        if column not in _NATIVE_UNMAPPED_COLUMNS.get(table, frozenset())
+    ]
 
 
 def get_customized_system_records(

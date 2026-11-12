@@ -1942,3 +1942,30 @@ def test_get_module_origins_normalizes_empty_values():
         "custom_x": {"author": None, "website": "https://acme.test"},
     }
     assert "state = 'installed'" in cur.queries[0][0]
+
+
+def test_get_orphan_fields_skips_native_columns_and_views():
+    cur = _FakeFetchallCursor([
+        ("auth_totp_device", "index", "character varying"),
+        ("auth_totp_device", "key", "character varying"),
+        ("ir_module_module", "web", "boolean"),
+        ("res_partner", "x_legacy", "integer"),
+        ("res_users_apikeys", "index", "character varying"),
+        ("res_users_apikeys", "key", "character varying"),
+        # same column name on a table outside the allowlist is still reported
+        ("sale_order", "key", "character varying"),
+    ])
+    rows = db.get_orphan_fields(cur)  # ty: ignore[invalid-argument-type]
+    assert rows == [
+        {"table": "res_partner", "column": "x_legacy", "data_type": "integer"},
+        {"table": "sale_order", "column": "key", "data_type": "character varying"},
+    ]
+    # SQL-view report models (_auto = False) have no fields to match: base tables only
+    assert "t.table_type = 'BASE TABLE'" in cur.queries[0][0]
+
+
+def test_queue_job_notify_trigger_and_function_both_recognized():
+    # queue_job installs a trigger and the function it runs under the same
+    # name; recognizing only the trigger reported the function as custom.
+    assert "queue_job_notify" in db._RECOGNIZED_TRIGGERS
+    assert "queue_job_notify" in db._RECOGNIZED_FUNCTIONS

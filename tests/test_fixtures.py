@@ -165,3 +165,26 @@ def test_cli_commands_run(fixture_db):
         assert result.exit_code == 0, f"{args} failed:\n{result.output}"
         # exit 0 with an empty or malformed body would otherwise pass; parse it.
         json.loads(result.output)
+
+
+def test_orphan_fields_skip_sql_views(fixture_db):
+    """A report model (``_auto = False``) is a view: its columns aren't orphans.
+
+    The report model, its view and the leftover column are added inside a
+    transaction that is rolled back, leaving the shared module-scoped database
+    untouched for the other tests.
+    """
+    _entry, dbname = fixture_db
+    with psycopg.connect(f"dbname={dbname}") as conn, conn.cursor() as cur:
+        try:
+            cur.execute("""
+                INSERT INTO ir_model (id, model) VALUES (100, 'res.partner'), (101, 'sale.report');
+                INSERT INTO ir_model_fields (model_id, name, ttype) VALUES (100, 'name', 'char');
+                ALTER TABLE res_partner ADD COLUMN x_legacy integer;
+                CREATE VIEW sale_report AS SELECT id, name AS partner_name FROM res_partner;
+            """)
+            orphans = {(r["table"], r["column"]) for r in db.get_orphan_fields(cur)}
+        finally:
+            conn.rollback()
+    assert ("res_partner", "x_legacy") in orphans
+    assert not {o for o in orphans if o[0] == "sale_report"}

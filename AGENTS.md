@@ -165,7 +165,11 @@ dump won't tell you):
   `--admin-user LOGIN` (repeatable) excludes a specific login from the
   `customized_records` scan — useful when the primary admin uses a personal
   account instead of the system `admin` user.
-  Additional bundle fields: `orphan_fields` (list of `{table, column, reason}`),
+  Additional bundle fields: `orphan_fields` (list of `{table, column,
+  data_type}`: columns of real tables, not SQL-view report models, with no
+  `ir_model_fields` row; columns core creates with raw SQL —
+  `ir_module_module.web`, `res_users_apikeys`/`auth_totp_device`
+  `key`/`index` — are skipped via `db._NATIVE_UNMAPPED_COLUMNS`),
   `customized_records` (list of `{model, module, xml_id, modified_by_id,
   noupdate}`; the editor's login is added as `modified_by` only with the
   global `--include-sensitive-information`, so the bundle carries no login by
@@ -660,7 +664,10 @@ documents the CLI for the free-audit landing on `migration.trobz.com`.
   `prepare-audit` probes and its studio scan) — run with the right shape, and agree with each version's
   `manifest.json` entry. `groups` exercises the real category join
   (`category_id`/`privilege_id`) and `_localize` over jsonb translated names
-  (16.0+), which the fixtures model. Single job, not a per-version matrix, because the
+  (16.0+), which the fixtures model. `get_orphan_fields`' base-table filter is
+  checked against a real SQL view (a report model), which that test adds in a
+  transaction it rolls back, leaving the shared per-version database untouched.
+  Single job, not a per-version matrix, because the
   fixtures are tiny in-process SQL loads; it becomes a matrix only if real
   neutralized dumps replace the synthetic SQL. `tests/test_fixtures.py` is
   parametrized over the manifest (the oracle — no second hardcoded copy) and
