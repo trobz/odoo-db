@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.31.2 (2026-11-12)
+
+### Bug Fixes
+
+- **not-odoo**: Recognize queue_job_notify function
+  ([`c929f15`](https://github.com/trobz/odoo-db/commit/c929f15a8025592d5901bea977355902f37cecb9))
+
+- **prepare-audit**: Don't report native columns as orphan fields
+  ([`78b0d4d`](https://github.com/trobz/odoo-db/commit/78b0d4d409d1642be071b9509f40e6218b16a004))
+
+
 ## v1.31.1 (2026-11-10)
 
 ### Bug Fixes
